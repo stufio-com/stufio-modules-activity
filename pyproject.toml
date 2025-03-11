@@ -15,3 +15,9 @@ dependencies = [
 
 [project.urls]
 repository = "https://github.com/stufio-com/stufio-activity"
+
+[tool.setuptools]
+packages = ["stufio.modules.activity"]
+
+[tool.setuptools.packages.find]
+where = ["."]

@@ -17,5 +17,5 @@ dependencies = [
 repository = "https://github.com/stufio-com/stufio-activity"
 
 [tool.setuptools]
-package-dir = {"stufio.modules" = "."}
+package-dir = {"stufio.modules.activity" = "."}
 packages = ["stufio.modules.activity"]

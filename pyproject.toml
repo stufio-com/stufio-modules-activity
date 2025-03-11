@@ -18,4 +18,4 @@ repository = "https://github.com/stufio-com/stufio-activity"
 
 [tool.setuptools]
 package-dir = {"stufio.modules.activity" = "stufio/modules/activity"}
-packages = ["stufio.modules.activity"]
+packages.find = {include = ["stufio.modules.activity", "stufio.modules.activity.*"]}

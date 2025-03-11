@@ -19,3 +19,4 @@ repository = "https://github.com/stufio-com/stufio-activity"
 [tool.setuptools]
 package-dir = {"" = "."}
 packages = ["stufio.modules.activity"]
+find_namespace = true

@@ -1,7 +1,7 @@
 from fastapi import FastAPI
 from typing import List, Callable, Any, Tuple
 
-from app.config import settings
+from stufio.core.config import get_settings
 from stufio.core.module_registry import ModuleInterface
 from .api import api_router
 from .models import (
@@ -11,8 +11,9 @@ from .models import (
     UserSecurityProfile
 )
 from .middleware import ActivityTrackingMiddleware, RateLimitingMiddleware
-
 from .__version__ import __version__
+
+settings = get_settings()
 
 class ActivityModule(ModuleInterface):
     """Activity tracking and rate limiting module."""

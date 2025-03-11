@@ -5,15 +5,15 @@ from bson import ObjectId
 from clickhouse_connect.driver.asyncclient import AsyncClient
 from stufio.crud.clickhouse_base import CRUDClickhouseBase
 from stufio.crud.mongo_base import CRUDMongoBase
-from app.config import settings
-from odmantic.engine import AIOEngine
 from ..models import (
     RateLimitOverride,
     RateLimit,
 )
 from ..schemas import RateLimitStatus, ViolationReport, RateLimitConfigResponse
-
+from stufio.core.config import get_settings
 import logging
+
+settings = get_settings()
 logger = logging.getLogger(__name__)
 
 

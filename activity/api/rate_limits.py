@@ -4,10 +4,11 @@ from motor.core import AgnosticDatabase
 
 from stufio import models
 from stufio.api import deps
-from app.config import settings
 from ..schemas import RateLimitStatus
 from ..crud import crud_rate_limit
+from stufio.core.config import get_settings
 
+settings = get_settings()
 router = APIRouter()
 
 

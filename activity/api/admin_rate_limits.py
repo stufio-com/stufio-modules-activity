@@ -5,7 +5,6 @@ from motor.core import AgnosticDatabase
 from stufio import models
 from stufio.api import deps
 from stufio.schemas.msg import Msg
-from app.config import settings
 from ..schemas import (
     RateLimitOverride,
     RateLimitConfigCreate,
@@ -14,7 +13,9 @@ from ..schemas import (
     ViolationReport,
 )
 from ..crud.crud_rate_limit import crud_rate_limit
+from stufio.core.config import get_settings
 
+settings = get_settings()
 router = APIRouter()
 
 

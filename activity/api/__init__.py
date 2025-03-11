@@ -6,7 +6,9 @@ from .admin_security import router as admin_security_router
 from .rate_limits import router as rate_limits_router
 from .admin_analytics import router as admin_analytics_router
 
-from app.config import settings
+from stufio.core.config import get_settings
+
+settings = get_settings()
 
 api_router = APIRouter()
 api_router.include_router(activities_router, prefix="", tags=["activities"])

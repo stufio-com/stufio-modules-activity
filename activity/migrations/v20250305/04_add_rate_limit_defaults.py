@@ -1,6 +1,8 @@
 from stufio.core.migrations.base import MongoMigrationScript
 from datetime import datetime
-from app.config import settings
+from stufio.core.config import get_settings
+
+settings = get_settings()
 
 class SeedRateLimitConfigs(MongoMigrationScript):
     name = "seed_rate_limit_configs"

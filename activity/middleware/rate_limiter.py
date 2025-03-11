@@ -7,10 +7,11 @@ from fastapi.responses import JSONResponse
 
 from stufio.api import deps
 from stufio.db.clickhouse import ClickhouseDatabase
-from app.config import settings
+from stufio.core.config import get_settings
 from stufio.api.deps import get_db
 from ..crud.crud_rate_limit import crud_rate_limit
 
+settings = get_settings()
 logger = logging.getLogger(__name__)
 
 class RateLimitingMiddleware(BaseHTTPMiddleware):

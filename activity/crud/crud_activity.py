@@ -9,10 +9,10 @@ from ..schemas import TrustedDeviceCreate
 from motor.core import AgnosticDatabase
 from stufio.crud.clickhouse_base import CRUDClickhouseBase
 from stufio.crud.mongo_base import CRUDMongoBase
-from app.config import settings
-
+from stufio.core.config import get_settings
 import logging
 
+settings = get_settings()
 logger = logging.getLogger(__name__)
 
 

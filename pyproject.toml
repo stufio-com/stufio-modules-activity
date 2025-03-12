@@ -3,7 +3,7 @@ requires = ["setuptools>=42", "wheel"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "stufio-activity"
+name = "stufio-modules-activity"
 version = "0.1.0"
 description = "Stufio.com Module: User activity tracking and Rate limiting"
 authors = [{name = "Ihar Finchuk", email = "if@if.codes"}]
@@ -14,8 +14,8 @@ dependencies = [
 ]
 
 [project.urls]
-repository = "https://github.com/stufio-com/stufio-activity"
+repository = "https://github.com/stufio-com/stufio-modules-activity"
 
 [tool.setuptools]
-package-dir = {"stufio.modules.activity" = "stufio/modules/activity"}
+package-dir = {"stufio.modules.activity" = "activity"}
 packages.find = {include = ["stufio.modules.activity", "stufio.modules.activity.*"]}

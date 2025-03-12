@@ -6,7 +6,6 @@ import asyncio
 import logging
 
 from stufio.api import deps
-from stufio.models import User
 from stufio.db.clickhouse import ClickhouseDatabase
 from ..crud import crud_activity
 from stufio.core.config import get_settings

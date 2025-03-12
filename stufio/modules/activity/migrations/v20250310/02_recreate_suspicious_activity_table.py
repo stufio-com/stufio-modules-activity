@@ -1,20 +1,23 @@
 from stufio.core.migrations.base import ClickhouseMigrationScript
+from stufio.db.clickhouse import get_database_from_dsn
 
 class RecreateSuspiciousActivityTable(ClickhouseMigrationScript):
     name = "recreate_suspicious_activity_table"
     description = "Drop and recreate the suspicious activity table with all required columns"
     migration_type = "schema"
     order = 20
-    
+
     async def run(self, db):
-        # Drop existing table if it exists
-        await db.command("""
-        DROP TABLE IF EXISTS user_suspicious_activity_logs
-        """)
+        db_name = get_database_from_dsn()
         
+        # Drop existing table if it exists
+        await db.command(f"""
+        DROP TABLE IF EXISTS `{db_name}`.`user_suspicious_activity_logs`
+        """)
+
         # Create new table with all columns
-        await db.command("""
-        CREATE TABLE user_suspicious_activity (
+        await db.command(f"""
+        CREATE TABLE IF NOT EXISTS `{db_name}`.`user_suspicious_activity` (
             timestamp DateTime64(3),
             date Date,
             user_id String,

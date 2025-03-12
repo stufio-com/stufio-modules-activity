@@ -52,7 +52,10 @@ async def get_trusted_devices(
     if not security_profile:
         return []
 
-    return [TrustedDeviceResponse(**device) for device in security_profile.trusted_devices]
+    return [
+        TrustedDeviceResponse(**device.model_dump())
+        for device in security_profile.known_fingerprints
+    ]
 
 
 @router.post("/user/security/trusted-devices", response_model=TrustedDeviceResponse)

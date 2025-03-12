@@ -40,14 +40,14 @@ async def get_rate_limit_status(
     # Check specific endpoint limits from MongoDB
     configs = await crud_rate_limit.get_all_rate_limit_configs(db, active_only=True)
     for config in configs:
-        endpoint = config["endpoint"]
+        endpoint = config.endpoint
         status[endpoint] = await crud_rate_limit.get_user_limit_status(
             db,
             clickhouse_db,
             user_id=user_id,
             path=endpoint,
-            max_requests=config.get("max_requests", 100),
-            window_seconds=config.get("window_seconds", 60)
+            max_requests=config.max_requests,
+            window_seconds=config.window_seconds
         )
 
     return status

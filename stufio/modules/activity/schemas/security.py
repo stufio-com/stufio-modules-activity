@@ -5,7 +5,7 @@ from typing import Optional, List
 
 class TrustedDeviceBase(BaseModel):
     """Base schema for trusted device"""
-    device_name: str
+    device_name: Optional[str] = None
     ip: str
     user_agent: str
 
@@ -17,7 +17,7 @@ class TrustedDeviceCreate(TrustedDeviceBase):
 
 class TrustedDeviceResponse(TrustedDeviceBase):
     """Response schema for trusted device"""
-    id: str
+    id: Optional[str] = None
     first_seen: datetime
     last_seen: datetime
     request_count: int

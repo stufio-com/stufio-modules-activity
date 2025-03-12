@@ -29,7 +29,7 @@ async def read_user_activities(
     activities, total = await crud_activity.get_user_activities(
         db, user_id=user_id, skip=skip, limit=limit
     )
-    return PaginatedResponse(data=activities, total=total, skip=skip, limit=limit)
+    return PaginatedResponse(items=activities, total=total, skip=skip, limit=limit)
 
 
 @router.get(

@@ -24,7 +24,7 @@ class CRUDUserActivity(
         """Initialize async resources"""
         # Get the engine for MongoDB
         self.engine = get_engine()
-        return self
+        return this
 
     async def create_activity(
         self,
@@ -339,27 +339,34 @@ class CRUDUserActivity(
     ) -> Tuple[List[UserActivity], int]:
         """Get recent activities for a user"""
         try:
+            # For count query, escape the curly braces with double braces
             count = await db.query(
-                f"SELECT count() FROM {UserActivity.get_table_name()} WHERE user_id = '{user_id}'"
+                f"SELECT count() FROM {UserActivity.get_table_name()} WHERE user_id = {{user_id:String}}",
+                parameters={"user_id": user_id}
             )
-            total = count.named_results()[0]["count()"]
+            
+            # Convert generator to list before accessing index
+            count_results = list(count.named_results())
+            total = count_results[0]["count()"] if count_results else 0
 
+            # For main query, use proper parameter syntax with types
+            table_name = UserActivity.get_table_name()
             activities = await db.query(
-                """
+                f"""
                 SELECT *
-                FROM {table}
-                WHERE user_id = '{user_id}'
+                FROM {table_name}
+                WHERE user_id = {{user_id:String}}
                 ORDER BY timestamp DESC
-                LIMIT {limit} OFFSET {skip}
+                LIMIT {{limit:UInt32}} OFFSET {{skip:UInt32}}
                 """,
                 parameters={
-                    "table": UserActivity.get_table_name(),
-                    "limit": limit,
-                    "skip": skip,
                     "user_id": user_id,
+                    "limit": limit,
+                    "skip": skip
                 },
             )
 
+            # activities.named_results() is also a generator, so use list() here too
             return [UserActivity(**activity) for activity in list(activities.named_results())], total
         except Exception as e:
             logger.error(f"Error getting user activities: {str(e)}")

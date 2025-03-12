@@ -10,6 +10,8 @@ from stufio.db.mongo_base import MongoBase
 class ClientFingerprint(EmbeddedModel):
     """Client metadata for fingerprinting"""
     ip: str
+    device_name: Optional[str] = None
+    ip: str
     user_agent: str
     first_seen: datetime = MongoField(default_factory=datetime_now_sec)
     last_seen: datetime = MongoField(default_factory=datetime_now_sec)

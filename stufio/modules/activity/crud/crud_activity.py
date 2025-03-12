@@ -24,7 +24,7 @@ class CRUDUserActivity(
         """Initialize async resources"""
         # Get the engine for MongoDB
         self.engine = get_engine()
-        return this
+        return self
 
     async def create_activity(
         self,
@@ -339,9 +339,9 @@ class CRUDUserActivity(
     ) -> Tuple[List[UserActivity], int]:
         """Get recent activities for a user"""
         try:
-            # For count query, escape the curly braces with double braces
+            # For count query, use proper parameter syntax with type
             count = await db.query(
-                f"SELECT count() FROM {UserActivity.get_table_name()} WHERE user_id = {{user_id:String}}",
+                f"SELECT count() FROM {UserActivity.get_table_name()} WHERE user_id = {user_id:String}",
                 parameters={"user_id": user_id}
             )
             

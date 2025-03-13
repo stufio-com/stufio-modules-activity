@@ -1,11 +1,13 @@
 import inspect
 import asyncio
 from ipaddress import ip_address
-from fastapi import Request, Response
+from locale import normalize
+from fastapi import Request, Response, FastAPI
 from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.types import ASGIApp
 import logging
 from fastapi.responses import JSONResponse
+import re
 
 from stufio.api import deps
 from stufio.db.clickhouse import ClickhouseDatabase
@@ -22,6 +24,23 @@ logger = logging.getLogger(__name__)
 class RateLimitingMiddleware(BaseHTTPMiddleware):
     def __init__(self, app: ASGIApp):
         super().__init__(app)
+        # Store a reference to the FastAPI app
+        self.app = app
+
+    def _get_route_pattern(self, path: str) -> str:
+        """
+        Extract the route pattern from a concrete URL path
+        
+        Examples:
+            /api/v1/domains/expired/by-date/2025-03-13/with-analysis
+            becomes
+            /api/v1/domains/expired/by-date/{expire_date}/with-analysis
+        """
+        normalized_path = path
+        normalized_path = re.sub(r"/\d{4}-\d{2}-\d{2}", "/{date}", normalized_path)
+        normalized_path = re.sub(r"/\d+", "/{int}", normalized_path)
+
+        return normalized_path
 
     async def dispatch(
         self,
@@ -29,19 +48,21 @@ class RateLimitingMiddleware(BaseHTTPMiddleware):
         call_next,
     ) -> Response:
         # Extract basic request info
-        path = request.url.path
-        client_ip = self._get_client_ip(request)
+        raw_path = request.url.path
 
         # Skip rate limiting for certain paths
-        if path in [
+        if raw_path in [
             "/metrics",
             "/health",
             settings.API_V1_STR + "/docs",
             settings.API_V1_STR + "/openapi.json",
         ]:
             return await call_next(request)
-
+        
         try:
+            normalized_path = self._get_route_pattern(raw_path)
+            client_ip = self._get_client_ip(request)
+        
             db = None
             db_generator = get_db()
 
@@ -115,12 +136,12 @@ class RateLimitingMiddleware(BaseHTTPMiddleware):
             # User-based rate limiting
             if user_id:
                 user_allowed = await rate_limit_service.check_limit(
-                    key=f"user:{user_id}:{path}",
+                    key=f"user:{user_id}:{normalized_path}",  # Use normalized path
                     max_requests=settings.activity_RATE_LIMIT_USER_MAX_REQUESTS,
                     window_seconds=settings.activity_RATE_LIMIT_USER_WINDOW_SECONDS,
                     clickhouse_db=clickhouse_db,
                     record_type="user",
-                    record_data={"user_id": user_id, "path": path},
+                    record_data={"user_id": user_id, "path": normalized_path},
                 )
 
                 if not user_allowed:
@@ -128,7 +149,7 @@ class RateLimitingMiddleware(BaseHTTPMiddleware):
                     asyncio.create_task(crud_rate_limit.set_user_rate_limited(
                         db=db,
                         user_id=user_id,
-                        reason=f"User rate limit exceeded for {path}",
+                        reason=f"User rate limit exceeded for {normalized_path}",
                         duration_minutes=10
                     ))
 
@@ -139,7 +160,7 @@ class RateLimitingMiddleware(BaseHTTPMiddleware):
 
             # Endpoint-specific rate limiting
             endpoint_config = await rate_limit_service.get_cached_config(
-                endpoint=path,
+                endpoint=normalized_path,
                 db_fetch_func=crud_rate_limit.get_rate_limit_config,
                 db=db,
             )
@@ -149,18 +170,18 @@ class RateLimitingMiddleware(BaseHTTPMiddleware):
                 window_seconds = endpoint_config.get("window_seconds", 60)
 
                 endpoint_allowed = await rate_limit_service.check_limit(
-                    key=f"endpoint:{path}:{client_ip}",
+                    key=f"endpoint:{normalized_path}:{client_ip}",
                     max_requests=max_requests,
                     window_seconds=window_seconds,
                     clickhouse_db=clickhouse_db,
                     record_type="endpoint",
-                    record_data={"ip": client_ip, "path": path}
+                    record_data={"ip": client_ip, "path": normalized_path}
                 )
 
                 if not endpoint_allowed:
                     return JSONResponse(
                         status_code=429,
-                        content={"detail": f"Rate limit exceeded for {path}"}
+                        content={"detail": f"Rate limit exceeded for {normalized_path}"}
                     )
 
         except Exception as e:

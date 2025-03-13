@@ -1,5 +1,7 @@
+import asyncio
+import logging
 from datetime import datetime, timedelta
-from typing import List, Dict, Any, Optional
+from typing import Dict, Any, Optional, List, Tuple
 from motor.core import AgnosticDatabase
 from bson import ObjectId
 from clickhouse_connect.driver.asyncclient import AsyncClient
@@ -11,7 +13,6 @@ from ..models import (
 )
 from ..schemas import RateLimitStatus, ViolationReport, RateLimitConfigResponse
 from stufio.core.config import get_settings
-import logging
 
 settings = get_settings()
 logger = logging.getLogger(__name__)
@@ -696,6 +697,235 @@ class CRUDRateLimit(
 
         result = await db.rate_limit_configs.delete_one({"_id": object_id})
         return result.deleted_count > 0
+
+    async def check_ip_limit(
+        self, 
+        clickhouse_db: AsyncClient,
+        *,
+        ip: str,
+        max_requests: int,
+        window_seconds: int
+    ) -> bool:
+        """Check if an IP address has exceeded its rate limit using materialized view"""
+        try:
+            # Use the aggregating table with materialized view
+            result = await clickhouse_db.query(
+                """
+                SELECT countMerge(request_count) as count
+                FROM ip_rate_limits
+                WHERE ip = {ip:String}
+                AND minute >= now() - interval {window:UInt32} second
+                """,
+                parameters={"ip": ip, "window": window_seconds},
+            )
+            
+            # Process results
+            count_results = list(result.named_results())
+            count = count_results[0]["count"] if count_results else 0
+            
+            return count < max_requests
+        except Exception as e:
+            logger.error(f"Error checking IP rate limit: {str(e)}")
+            return True  # Allow if error to prevent false blocks
+    
+    async def update_ip_request_count(
+        self,
+        clickhouse_db: AsyncClient,
+        *,
+        ip: str
+    ) -> None:
+        """Update IP request count in background (no need to wait for result)"""
+        try:
+            # ClickHouse materialized view will automatically update based on user_activity table
+            # So this function doesn't need to do anything explicit
+            # Just log for monitoring purposes
+            logger.debug(f"IP {ip} request logged - materialized view will update automatically")
+        except Exception as e:
+            logger.error(f"Error in background IP tracking: {str(e)}")
+    
+    async def check_user_limit(
+        self,
+        clickhouse_db: AsyncClient,
+        *,
+        user_id: str,
+        path: str,
+        max_requests: int,
+        window_seconds: int
+    ) -> bool:
+        """Check if a user has exceeded their rate limit for a specific path"""
+        try:
+            # Use the user-specific materialized view
+            result = await clickhouse_db.query(
+                """
+                SELECT countMerge(request_count) as count
+                FROM user_rate_limits
+                WHERE user_id = {user_id:String}
+                AND path = {path:String}
+                AND minute >= now() - interval {window:UInt32} second
+                """,
+                parameters={"user_id": user_id, "path": path, "window": window_seconds},
+            )
+            
+            count_results = list(result.named_results())
+            count = count_results[0]["count"] if count_results else 0
+            
+            return count < max_requests
+        except Exception as e:
+            logger.error(f"Error checking user rate limit: {str(e)}")
+            return True  # Allow if error
+
+    async def update_user_request_count(
+        self,
+        clickhouse_db: AsyncClient,
+        *,
+        user_id: str,
+        path: str
+    ) -> None:
+        """Update user request count in background (no need to wait for result)"""
+        try:
+            # Materialized view will handle this automatically
+            logger.debug(f"User {user_id} request to {path} logged - view will update automatically")
+        except Exception as e:
+            logger.error(f"Error in background user tracking: {str(e)}")
+
+    async def check_endpoint_limit(
+        self,
+        clickhouse_db: AsyncClient,
+        *,
+        path: str,
+        client_ip: str,
+        max_requests: int,
+        window_seconds: int
+    ) -> bool:
+        """Check if endpoint rate limit has been exceeded"""
+        try:
+            # Query the endpoint-specific materialized view
+            result = await clickhouse_db.query(
+                """
+                SELECT countMerge(request_count) as count
+                FROM endpoint_rate_limits
+                WHERE path = {path:String}
+                AND client_ip = {ip:String}
+                AND minute >= now() - interval {window:UInt32} second
+                """,
+                parameters={"path": path, "ip": client_ip, "window": window_seconds},
+            )
+            
+            count_results = list(result.named_results())
+            count = count_results[0]["count"] if count_results else 0
+            
+            return count < max_requests
+        except Exception as e:
+            logger.error(f"Error checking endpoint rate limit: {str(e)}")
+            return True
+
+    async def update_endpoint_request_count(
+        self,
+        clickhouse_db: AsyncClient,
+        *,
+        path: str,
+        client_ip: str
+    ) -> None:
+        """Update endpoint request count in background"""
+        try:
+            # Materialized view will handle this automatically
+            logger.debug(f"Request to {path} from {client_ip} logged - view will update automatically")
+        except Exception as e:
+            logger.error(f"Error in background endpoint tracking: {str(e)}")
+
+    async def get_rate_limit_config(self, db: AgnosticDatabase, *, endpoint: str) -> Optional[Dict[str, Any]]:
+        """Get rate limit configuration for an endpoint"""
+        try:
+            # Try to find exact match first
+            config = await db.rate_limit_configs.find_one({"endpoint": endpoint, "active": True})
+            
+            # If no exact match, try to find wildcard match
+            if not config:
+                # Get global default
+                config = await db.rate_limit_configs.find_one({"endpoint": "*", "active": True})
+                
+            return config
+        except Exception as e:
+            logger.error(f"Error fetching rate limit config: {str(e)}")
+            return None
+
+    # Methods for checking and working with user_rate_limits MongoDB collection
+    
+    async def set_user_rate_limited(
+        self,
+        db: AgnosticDatabase,
+        *,
+        user_id: str,
+        reason: str,
+        duration_minutes: int = 60
+    ) -> bool:
+        """Set a user as rate limited in MongoDB"""
+        try:
+            limited_until = datetime.utcnow() + timedelta(minutes=duration_minutes)
+            
+            result = await db.user_rate_limits.update_one(
+                {"user_id": user_id},
+                {
+                    "$set": {
+                        "is_limited": True,
+                        "reason": reason,
+                        "limited_until": limited_until,
+                        "updated_at": datetime.utcnow()
+                    }
+                },
+                upsert=True
+            )
+            
+            return result.modified_count > 0 or result.upserted_id is not None
+        except Exception as e:
+            logger.error(f"Error setting user rate limit: {str(e)}")
+            return False
+
+    async def remove_user_rate_limit(
+        self,
+        db: AgnosticDatabase,
+        *,
+        user_id: str
+    ) -> bool:
+        """Remove rate limit from a user"""
+        try:
+            result = await db.user_rate_limits.update_one(
+                {"user_id": user_id},
+                {
+                    "$set": {
+                        "is_limited": False,
+                        "updated_at": datetime.utcnow()
+                    },
+                    "$unset": {
+                        "reason": "",
+                        "limited_until": ""
+                    }
+                }
+            )
+            
+            return result.modified_count > 0
+        except Exception as e:
+            logger.error(f"Error removing user rate limit: {str(e)}")
+            return False
+
+    async def is_user_rate_limited(
+        self,
+        db: AgnosticDatabase,
+        *,
+        user_id: str
+    ) -> Tuple[bool, Optional[str]]:
+        """Check if a user is rate limited from MongoDB record"""
+        try:
+            record = await db.user_rate_limits.find_one({"user_id": user_id})
+            if record and record.get("is_limited", False):
+                # Check if limitation has expired
+                limited_until = record.get("limited_until")
+                if limited_until and limited_until > datetime.utcnow():
+                    return True, record.get("reason", "Rate limited")
+            return False, None
+        except Exception as e:
+            logger.error(f"Error checking user rate limit status: {str(e)}")
+            return False, None
 
 
 # Create singleton instance

@@ -580,7 +580,6 @@ class CRUDRateLimit(
         clickhouse_db: AsyncClient,
         *,
         ip: str,
-        max_requests: int,
         window_seconds: int
     ) -> bool:
         """Quickly check if an IP is already rate limited based on recent violations"""
@@ -653,7 +652,6 @@ class CRUDRateLimit(
         *,
         user_id: str,
         path: str,
-        max_requests: int,
         window_seconds: int
     ) -> bool:
         """Quickly check if a user is already rate limited based on recent violations"""
@@ -730,7 +728,6 @@ class CRUDRateLimit(
         *,
         path: str,
         client_ip: str,
-        max_requests: int,
         window_seconds: int
     ) -> bool:
         """Quickly check if an endpoint is already rate limited for this IP based on recent violations"""

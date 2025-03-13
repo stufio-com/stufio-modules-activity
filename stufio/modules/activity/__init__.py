@@ -6,6 +6,7 @@ from .api import api_router
 from .models import UserActivity, ClientFingerprint, RateLimit, UserSecurityProfile
 from .middleware import ActivityTrackingMiddleware, RateLimitingMiddleware
 from .__version__ import __version__
+from .config import ActivitySettings
 
 
 class ActivityModule(ModuleInterface):

@@ -9,13 +9,13 @@ class SeedRateLimitConfigs(MongoMigrationScript):
     description = "Seed rate limit configurations from settings"
     migration_type = "data"
     order = 40
-    
+
     async def run(self, db):
         # Create rate_limit_configs collection if it doesn't exist
         existing_collections = await db.list_collection_names()
         if "rate_limit_configs" not in existing_collections:
             await db.create_collection("rate_limit_configs")
-        
+
         # Create or update indexes
         await db.command({
             "createIndexes": "rate_limit_configs",
@@ -31,24 +31,24 @@ class SeedRateLimitConfigs(MongoMigrationScript):
                 }
             ]
         })
-        
+
         # Import default configs from settings
         now = datetime.utcnow()
-        
+
         # Add global default config
         global_defaults = [
             {
                 "endpoint": "*",  # Global default
-                "max_requests": settings.RATE_LIMIT_USER_MAX_REQUESTS,
-                "window_seconds": settings.RATE_LIMIT_USER_WINDOW_SECONDS,
+                "max_requests": settings.activity_RATE_LIMIT_USER_MAX_REQUESTS,
+                "window_seconds": settings.activity_RATE_LIMIT_USER_WINDOW_SECONDS,
                 "active": True,
                 "bypass_roles": ["admin", "system"],
                 "description": "Global default rate limit",
                 "created_at": now,
-                "updated_at": now
+                "updated_at": now,
             }
         ]
-        
+
         # Add configs from settings
         endpoint_configs = []
         for endpoint, config in settings.RATE_LIMIT_ENDPOINTS.items():
@@ -62,7 +62,7 @@ class SeedRateLimitConfigs(MongoMigrationScript):
                 "created_at": now,
                 "updated_at": now
             })
-        
+
         # Additional pre-defined rate limits for common endpoints
         additional_configs = [
             {
@@ -96,10 +96,10 @@ class SeedRateLimitConfigs(MongoMigrationScript):
                 "updated_at": now
             }
         ]
-        
+
         # Combine all configs
         all_configs = global_defaults + endpoint_configs + additional_configs
-        
+
         # Upsert all configs
         for config in all_configs:
             await db.rate_limit_configs.update_one(
@@ -107,5 +107,5 @@ class SeedRateLimitConfigs(MongoMigrationScript):
                 {"$set": config},
                 upsert=True
             )
-            
+
         print(f"Seeded {len(all_configs)} rate limit configurations")

@@ -197,7 +197,7 @@ class CRUDUserActivity(
                         unique_ips.add(activity.client_ip)
 
                     # If too many unique IPs, mark as suspicious
-                    if len(unique_ips) > settings.SECURITY_MAX_UNIQUE_IPS_PER_DAY:
+                    if len(unique_ips) > settings.activity_SECURITY_MAX_UNIQUE_IPS_PER_DAY:
                         # Update security profile
                         security_profile.suspicious_activity_count += 1
                         security_profile.last_suspicious_activity = datetime.utcnow()
@@ -638,6 +638,26 @@ class CRUDUserActivity(
         )
 
         return ip_block
+
+    async def unblock_ip(
+        self,
+        db: AgnosticDatabase,
+        *,
+        ip_address: str
+    ) -> bool:
+        """Remove an IP from the blacklist"""
+        result = await db.ip_blacklist.delete_one({"ip": ip_address})
+        return result.deleted_count > 0
+
+    async def check_ip_blacklisted(
+        self, db: AgnosticDatabase, *, ip_address: str
+    ) -> Tuple[bool, Optional[str]]:
+        """Check if an IP is blacklisted"""
+        ip_block = await db.ip_blacklist.find_one({"ip": ip_address})
+        if ip_block:
+            return True, ip_block.get("reason")
+
+        return False, None
 
     async def restrict_user(
         self,

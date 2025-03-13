@@ -29,12 +29,12 @@ async def get_rate_limit_status(
 
     # Overall API limit
     status["api"] = await crud_rate_limit.get_user_limit_status(
-        db, 
+        db,
         clickhouse_db,
         user_id=user_id,
         path="*",
-        max_requests=settings.RATE_LIMIT_USER_MAX_REQUESTS,
-        window_seconds=settings.RATE_LIMIT_USER_WINDOW_SECONDS
+        max_requests=settings.activity_RATE_LIMIT_USER_MAX_REQUESTS,
+        window_seconds=settings.activity_RATE_LIMIT_USER_WINDOW_SECONDS,
     )
 
     # Check specific endpoint limits from MongoDB

@@ -162,7 +162,7 @@ class CRUDUserActivity(
         sensitive_paths = [
             settings.API_V1_STR + "/login/*",
             settings.API_V1_STR + "/users/*",
-            settings.API_V1_STR + "/admin/*",
+            settings.API_V1_STR + settings.API_ADMIN_STR + "/*",
         ]
 
         if user_id:

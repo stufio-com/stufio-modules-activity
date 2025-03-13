@@ -24,8 +24,6 @@ logger = logging.getLogger(__name__)
 class RateLimitingMiddleware(BaseHTTPMiddleware):
     def __init__(self, app: ASGIApp):
         super().__init__(app)
-        # Store a reference to the FastAPI app
-        self.app = app
 
     def _get_route_pattern(self, path: str) -> str:
         """

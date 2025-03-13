@@ -1,4 +1,3 @@
-import asyncio
 import logging
 from datetime import datetime, timedelta
 from typing import Dict, Any, Optional, List, Tuple
@@ -22,175 +21,6 @@ class CRUDRateLimit(
     CRUDMongoBase[RateLimit, None, None], CRUDClickhouseBase[RateLimit, None, None]
 ):
     """CRUD operations for rate limits and overrides"""
-
-    async def check_and_update_ip_limit(
-        self,
-        db: AgnosticDatabase,
-        clickhouse_db: AsyncClient,
-        ip: str,
-        max_requests: int,
-        window_seconds: int
-    ) -> bool:
-        """
-        Check if IP has exceeded rate limit.
-        Returns True if request is allowed, False if rate limit exceeded.
-        """
-        # First check if IP is blacklisted
-        blacklisted = await db.ip_blacklist.find_one({"ip": ip})
-        if blacklisted:
-            return False
-
-        key = f"ip:{ip}"
-        return await self._check_and_update_limit(
-            clickhouse_db=clickhouse_db,
-            db=db,
-            key=key,
-            type="ip",
-            max_requests=max_requests,
-            window_seconds=window_seconds,
-            ip=ip
-        )
-
-    async def check_and_update_user_limit(
-        self,
-        db: AgnosticDatabase,
-        clickhouse_db: AsyncClient,
-        user_id: str,
-        path: str,
-        max_requests: int,
-        window_seconds: int
-    ) -> bool:
-        """
-        Check if user has exceeded rate limit for a specific path.
-        Returns True if request is allowed, False if rate limit exceeded.
-        """
-        # First, check for any overrides for this user
-        override = await self._get_user_override(db, user_id=user_id, path=path)
-        if override:
-            # Use override values if not expired
-            now = datetime.utcnow()
-            if override.get("expires_at") and override.get("expires_at") < now:
-                # Override expired, delete it
-                await db.rate_limit_overrides.delete_one({"_id": override["_id"]})
-            else:
-                # Use override values
-                max_requests = override.get("max_requests", max_requests)
-                window_seconds = override.get("window_seconds", window_seconds)
-
-        key = f"user:{user_id}:{path}"
-        return await self._check_and_update_limit(
-            clickhouse_db=clickhouse_db,
-            db=db, 
-            key=key,
-            type="user",
-            max_requests=max_requests,
-            window_seconds=window_seconds,
-            user_id=user_id,
-            endpoint=path
-        )
-
-    async def check_and_update_endpoint_limit(
-        self,
-        db: AgnosticDatabase,
-        clickhouse_db: AsyncClient,
-        endpoint: str,
-        client_ip: str,
-        max_requests: int,
-        window_seconds: int
-    ) -> bool:
-        """
-        Check if endpoint+IP has exceeded rate limit.
-        Returns True if request is allowed, False if rate limit exceeded.
-        """
-        key = f"endpoint:{endpoint}:ip:{client_ip}"
-        return await self._check_and_update_limit(
-            clickhouse_db=clickhouse_db,
-            db=db,
-            key=key,
-            type="endpoint",
-            max_requests=max_requests,
-            window_seconds=window_seconds,
-            ip=client_ip,
-            endpoint=endpoint
-        )
-
-    async def _check_and_update_limit(
-        self,
-        clickhouse_db: AsyncClient,
-        db: AgnosticDatabase,
-        key: str,
-        type: str,
-        max_requests: int,
-        window_seconds: int,
-        ip: Optional[str] = None,
-        user_id: Optional[str] = None,
-        endpoint: Optional[str] = None
-    ) -> bool:
-        """Core rate limiting logic using ClickHouse"""
-        try:
-            now = datetime.utcnow()
-            window_start = now - timedelta(seconds=window_seconds)
-
-            # Query existing requests in this time window - FIXED PARAMETER SYNTAX
-            result = await clickhouse_db.query(
-                """
-                SELECT sum(counter) as total_count
-                FROM rate_limits
-                WHERE key = %(key)s AND window_start >= %(window_start)s
-                """,
-                parameters={
-                    "key": key,
-                    "window_start": window_start
-                }
-            )
-
-            # Get total count from result
-            total_count = result.first_row[0] if result.row_count > 0 else 0
-
-            # Check if limit exceeded
-            if total_count >= max_requests:
-                # Record violation for analytics
-                await self._record_violation(
-                    clickhouse_db=clickhouse_db,
-                    key=key,
-                    type=type,
-                    limit=max_requests,
-                    attempts=total_count + 1,  # Including this attempt
-                    ip=ip,
-                    user_id=user_id,
-                    endpoint=endpoint
-                )
-                return False
-
-            # Record this request
-            window_end = now + timedelta(seconds=window_seconds)
-
-            data = {
-                "timestamp": now,
-                "date": now.replace(hour=0, minute=0, second=0, microsecond=0),
-                "key": key,
-                "type": type,
-                "counter": 1,
-                "window_start": now,
-                "window_end": window_end,
-                "ip": ip,
-                "user_id": user_id,
-                "endpoint": endpoint
-            }
-
-            # Insert request into ClickHouse
-            await clickhouse_db.insert(
-                'rate_limits',
-                [list(data.values())],
-                column_names=list(data.keys())
-            )
-
-            return True
-        except Exception as e:
-            logger.error(f"Error checking rate limit: {str(e)}")
-            # In case of error, allow the request to proceed
-            # This is safer than accidentally blocking legitimate requests
-            return True
 
     async def get_user_limit_status(
         self,
@@ -421,27 +251,29 @@ class CRUDRateLimit(
         """Get recent rate limit violations from ClickHouse"""
         try:
             where_clauses = []
-            params = {}
+            parameters = {}
 
             # Add date range filter if provided
             if start_date:
-                where_clauses.append("date >= {start_date}")
-                params["start_date"] = start_date.date()
+                where_clauses.append("date >= {start_date:Date}")
+                parameters["start_date"] = start_date.date()
             else:
                 # Default to last 7 days
                 where_clauses.append("date >= today() - 7")
 
             if end_date:
-                where_clauses.append("date <= {end_date}")
-                params["end_date"] = end_date.date()
+                where_clauses.append("date <= {end_date:Date}")
+                parameters["end_date"] = end_date.date()
 
             # Add type filter if provided
             if type:
-                where_clauses.append("type = {type}")
-                params["type"] = type
+                where_clauses.append("type = {type:String}")
+                parameters["type"] = type
 
             # Combine all WHERE clauses
             where_clause = " AND ".join(where_clauses) if where_clauses else "1=1"
+            parameters["limit"] = limit
+            parameters["skip"] = skip
 
             # Execute query
             result = await clickhouse_db.query(
@@ -459,12 +291,14 @@ class CRUDRateLimit(
                 FROM rate_limit_violations
                 WHERE {where_clause}
                 ORDER BY timestamp DESC
-                LIMIT {limit} OFFSET {skip}
+                LIMIT {{limit:UInt32}} OFFSET {{skip:UInt32}}
                 """,
-                parameters=params
+                parameters=parameters
             )
 
-            return list([ViolationReport(**row) for row in list(result.named_results())])
+            # Convert results to model objects
+            violations = list(result.named_results())
+            return [ViolationReport(**row) for row in violations]
         except Exception as e:
             logger.error(f"Error fetching rate limit violations: {str(e)}")
             return []
@@ -476,8 +310,20 @@ class CRUDRateLimit(
     ) -> Dict[str, Any]:
         """Get rate limit analytics from ClickHouse"""
         try:
-            # Get summary stats
+            # Get summary stats from materialized views
             summary = await clickhouse_db.query(
+                """
+                SELECT
+                    countMerge(request_count) AS total_requests,
+                    uniq(ip) AS unique_ips
+                FROM ip_rate_limits
+                WHERE minute >= now() - interval {days:UInt32} day
+                """,
+                parameters={"days": days}
+            )
+            
+            # Get violations stats
+            violations = await clickhouse_db.query(
                 """
                 SELECT
                     count() AS total_violations,
@@ -486,7 +332,7 @@ class CRUDRateLimit(
                     uniq(endpoint) AS unique_endpoints,
                     avg(attempts) AS avg_attempts
                 FROM rate_limit_violations
-                WHERE date >= today() - {days}
+                WHERE date >= today() - {days:UInt32}
                 """,
                 parameters={"days": days}
             )
@@ -496,9 +342,9 @@ class CRUDRateLimit(
                 """
                 SELECT
                     type,
-                    count() AS count
+                    count()
                 FROM rate_limit_violations
-                WHERE date >= today() - {days}
+                WHERE date >= today() - {days:UInt32}
                 GROUP BY type
                 ORDER BY count DESC
                 """,
@@ -512,7 +358,7 @@ class CRUDRateLimit(
                     client_ip,
                     count() AS violations
                 FROM rate_limit_violations
-                WHERE date >= today() - {days} AND client_ip IS NOT NULL
+                WHERE date >= today() - {days:UInt32} AND client_ip IS NOT NULL
                 GROUP BY client_ip
                 ORDER BY violations DESC
                 LIMIT 10
@@ -527,29 +373,60 @@ class CRUDRateLimit(
                     date,
                     count() AS violations
                 FROM rate_limit_violations
-                WHERE date >= today() - {days}
+                WHERE date >= today() - {days:UInt32}
                 GROUP BY date
                 ORDER BY date
                 """,
                 parameters={"days": days}
             )
+            
+            # Get materialized view stats (how many requests were tracked)
+            view_stats = await clickhouse_db.query(
+                """
+                SELECT 
+                    'ip' as view_type, 
+                    countMerge(request_count) as tracked_requests 
+                FROM ip_rate_limits 
+                WHERE minute >= now() - interval {days:UInt32} day
+                
+                UNION ALL
+                
+                SELECT 
+                    'user' as view_type, 
+                    countMerge(request_count) as tracked_requests 
+                FROM user_rate_limits 
+                WHERE minute >= now() - interval {days:UInt32} day
+                
+                UNION ALL
+                
+                SELECT 
+                    'endpoint' as view_type, 
+                    countMerge(request_count) as tracked_requests 
+                FROM endpoint_rate_limits 
+                WHERE minute >= now() - interval {days:UInt32} day
+                """,
+                parameters={"days": days}
+            )
 
             return {
-                "summary": summary.first_rows_as_dicts()[0] if summary.row_count > 0 else {},
+                "summary": list(summary.named_results())[0] if summary.row_count > 0 else {},
+                "violations": list(violations.named_results())[0] if violations.row_count > 0 else {},
                 "by_type": list(by_type.named_results()),
                 "top_ips": list(top_ips.named_results()),
-                "by_day": list(by_day.named_results())
+                "by_day": list(by_day.named_results()),
+                "view_stats": list(view_stats.named_results())
             }
         except Exception as e:
             logger.error(f"Error getting rate limit analytics: {str(e)}")
             return {
                 "summary": {},
+                "violations": {},
                 "by_type": [],
                 "top_ips": [],
-                "by_day": []
+                "by_day": [],
+                "view_stats": []
             }
 
-            # Add these methods to your existing CRUDRateLimit class
 
     async def get_rate_limit_config(
         self,
@@ -706,9 +583,43 @@ class CRUDRateLimit(
         max_requests: int,
         window_seconds: int
     ) -> bool:
-        """Check if an IP address has exceeded its rate limit using materialized view"""
+        """Quickly check if an IP is already rate limited based on recent violations"""
         try:
-            # Use the aggregating table with materialized view
+            # First, check for recent violations (super fast)
+            recent_time = datetime.utcnow() - timedelta(seconds=window_seconds)
+            result = await clickhouse_db.query(
+                """
+                SELECT 1
+                FROM rate_limit_violations
+                WHERE client_ip = {ip:String}
+                  AND timestamp >= {recent_time:DateTime}
+                  AND type = 'ip'
+                LIMIT 1
+                """,
+                parameters={"ip": ip, "recent_time": recent_time},
+            )
+            
+            # If a violation exists, block immediately
+            if result.row_count > 0:
+                return False
+                
+            # Otherwise, let it pass and do detailed checking in background
+            return True
+        except Exception as e:
+            logger.error(f"Error checking IP rate limit: {str(e)}")
+            return True  # Allow if error to prevent false blocks
+
+    async def update_ip_request_count(
+        self,
+        clickhouse_db: AsyncClient,
+        *,
+        ip: str,
+        max_requests: int,
+        window_seconds: int
+    ) -> None:
+        """Update IP request count and record violations in background"""
+        try:
+            # Check if request count exceeds limit
             result = await clickhouse_db.query(
                 """
                 SELECT countMerge(request_count) as count
@@ -723,23 +634,16 @@ class CRUDRateLimit(
             count_results = list(result.named_results())
             count = count_results[0]["count"] if count_results else 0
             
-            return count < max_requests
-        except Exception as e:
-            logger.error(f"Error checking IP rate limit: {str(e)}")
-            return True  # Allow if error to prevent false blocks
-    
-    async def update_ip_request_count(
-        self,
-        clickhouse_db: AsyncClient,
-        *,
-        ip: str
-    ) -> None:
-        """Update IP request count in background (no need to wait for result)"""
-        try:
-            # ClickHouse materialized view will automatically update based on user_activity table
-            # So this function doesn't need to do anything explicit
-            # Just log for monitoring purposes
-            logger.debug(f"IP {ip} request logged - materialized view will update automatically")
+            # Record violation if limit exceeded
+            if count >= max_requests:
+                await self._record_violation(
+                    clickhouse_db=clickhouse_db,
+                    key=f"ip:{ip}",
+                    type="ip",
+                    limit=max_requests,
+                    attempts=count,
+                    ip=ip
+                )
         except Exception as e:
             logger.error(f"Error in background IP tracking: {str(e)}")
     
@@ -752,9 +656,45 @@ class CRUDRateLimit(
         max_requests: int,
         window_seconds: int
     ) -> bool:
-        """Check if a user has exceeded their rate limit for a specific path"""
+        """Quickly check if a user is already rate limited based on recent violations"""
         try:
-            # Use the user-specific materialized view
+            # First, check for recent violations (super fast)
+            recent_time = datetime.utcnow() - timedelta(seconds=window_seconds)
+            result = await clickhouse_db.query(
+                """
+                SELECT 1
+                FROM rate_limit_violations
+                WHERE user_id = {user_id:String}
+                  AND path = {path:String}
+                  AND timestamp >= {recent_time:DateTime}
+                  AND type = 'user'
+                LIMIT 1
+                """,
+                parameters={"user_id": user_id, "path": path, "recent_time": recent_time},
+            )
+            
+            # If a violation exists, block immediately
+            if result.row_count > 0:
+                return False
+                
+            # Otherwise, let it pass and do detailed checking in background
+            return True
+        except Exception as e:
+            logger.error(f"Error checking user rate limit: {str(e)}")
+            return True  # Allow if error to prevent false blocks
+
+    async def update_user_request_count(
+        self,
+        clickhouse_db: AsyncClient,
+        *,
+        user_id: str,
+        path: str,
+        max_requests: int,
+        window_seconds: int
+    ) -> None:
+        """Update user request count and record violations in background"""
+        try:
+            # Query the user-specific materialized view for detailed check
             result = await clickhouse_db.query(
                 """
                 SELECT countMerge(request_count) as count
@@ -766,25 +706,21 @@ class CRUDRateLimit(
                 parameters={"user_id": user_id, "path": path, "window": window_seconds},
             )
             
+            # Process results
             count_results = list(result.named_results())
             count = count_results[0]["count"] if count_results else 0
             
-            return count < max_requests
-        except Exception as e:
-            logger.error(f"Error checking user rate limit: {str(e)}")
-            return True  # Allow if error
-
-    async def update_user_request_count(
-        self,
-        clickhouse_db: AsyncClient,
-        *,
-        user_id: str,
-        path: str
-    ) -> None:
-        """Update user request count in background (no need to wait for result)"""
-        try:
-            # Materialized view will handle this automatically
-            logger.debug(f"User {user_id} request to {path} logged - view will update automatically")
+            # Record violation if limit exceeded
+            if count >= max_requests:
+                await self._record_violation(
+                    clickhouse_db=clickhouse_db,
+                    key=f"user:{user_id}:{path}",
+                    type="user",
+                    limit=max_requests,
+                    attempts=count,
+                    user_id=user_id,
+                    endpoint=path
+                )
         except Exception as e:
             logger.error(f"Error in background user tracking: {str(e)}")
 
@@ -797,9 +733,45 @@ class CRUDRateLimit(
         max_requests: int,
         window_seconds: int
     ) -> bool:
-        """Check if endpoint rate limit has been exceeded"""
+        """Quickly check if an endpoint is already rate limited for this IP based on recent violations"""
         try:
-            # Query the endpoint-specific materialized view
+            # First, check for recent violations (super fast)
+            recent_time = datetime.utcnow() - timedelta(seconds=window_seconds)
+            result = await clickhouse_db.query(
+                """
+                SELECT 1
+                FROM rate_limit_violations
+                WHERE client_ip = {ip:String}
+                  AND endpoint = {path:String}
+                  AND timestamp >= {recent_time:DateTime}
+                  AND type = 'endpoint'
+                LIMIT 1
+                """,
+                parameters={"ip": client_ip, "path": path, "recent_time": recent_time},
+            )
+            
+            # If a violation exists, block immediately
+            if result.row_count > 0:
+                return False
+                
+            # Otherwise, let it pass and do detailed checking in background
+            return True
+        except Exception as e:
+            logger.error(f"Error checking endpoint rate limit: {str(e)}")
+            return True  # Allow if error to prevent false blocks
+
+    async def update_endpoint_request_count(
+        self,
+        clickhouse_db: AsyncClient,
+        *,
+        path: str,
+        client_ip: str,
+        max_requests: int,
+        window_seconds: int
+    ) -> None:
+        """Update endpoint request count and record violations in background"""
+        try:
+            # Query the endpoint-specific materialized view for detailed check
             result = await clickhouse_db.query(
                 """
                 SELECT countMerge(request_count) as count
@@ -811,25 +783,21 @@ class CRUDRateLimit(
                 parameters={"path": path, "ip": client_ip, "window": window_seconds},
             )
             
+            # Process results
             count_results = list(result.named_results())
             count = count_results[0]["count"] if count_results else 0
             
-            return count < max_requests
-        except Exception as e:
-            logger.error(f"Error checking endpoint rate limit: {str(e)}")
-            return True
-
-    async def update_endpoint_request_count(
-        self,
-        clickhouse_db: AsyncClient,
-        *,
-        path: str,
-        client_ip: str
-    ) -> None:
-        """Update endpoint request count in background"""
-        try:
-            # Materialized view will handle this automatically
-            logger.debug(f"Request to {path} from {client_ip} logged - view will update automatically")
+            # Record violation if limit exceeded
+            if count >= max_requests:
+                await self._record_violation(
+                    clickhouse_db=clickhouse_db,
+                    key=f"endpoint:{path}:{client_ip}",
+                    type="endpoint",
+                    limit=max_requests,
+                    attempts=count,
+                    ip=client_ip,
+                    endpoint=path
+                )
         except Exception as e:
             logger.error(f"Error in background endpoint tracking: {str(e)}")
 

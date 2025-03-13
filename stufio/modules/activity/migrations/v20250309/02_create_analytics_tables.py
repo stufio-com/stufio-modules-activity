@@ -5,7 +5,7 @@ class CreateAnalyticsTables(ClickhouseMigrationScript):
     name = "create_analytics_tables"
     description = "Create ClickHouse tables for activity analytics"
     migration_type = "schema"
-    order = 20
+    order = 30
     
     async def run(self, db: AsyncClient) -> None:
         # Create user activity summary table

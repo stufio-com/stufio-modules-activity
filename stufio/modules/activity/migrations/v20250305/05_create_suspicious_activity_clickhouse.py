@@ -4,7 +4,7 @@ class CreateSuspiciousActivityTable(ClickhouseMigrationScript):
     name = "create_suspicious_activity_table"
     description = "Create ClickHouse table for suspicious activity logs"
     migration_type = "schema"
-    order = 40
+    order = 50
     
     async def run(self, db):
         await db.command("""

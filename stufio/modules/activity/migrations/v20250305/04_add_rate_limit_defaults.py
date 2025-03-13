@@ -66,7 +66,7 @@ class SeedRateLimitConfigs(MongoMigrationScript):
         # Additional pre-defined rate limits for common endpoints
         additional_configs = [
             {
-                "endpoint": "/api/v1/login",
+                "endpoint": "/api/v1/login*",
                 "max_requests": 5,
                 "window_seconds": 60,
                 "active": True,
@@ -76,7 +76,7 @@ class SeedRateLimitConfigs(MongoMigrationScript):
                 "updated_at": now
             },
             {
-                "endpoint": "/api/v1/users",
+                "endpoint": "/api/v1/users*",
                 "max_requests": 20,
                 "window_seconds": 60,
                 "active": True,
@@ -86,7 +86,7 @@ class SeedRateLimitConfigs(MongoMigrationScript):
                 "updated_at": now
             },
             {
-                "endpoint": "/api/v1/domains",
+                "endpoint": "/api/v1/domains*",
                 "max_requests": 30,
                 "window_seconds": 60,
                 "active": True,

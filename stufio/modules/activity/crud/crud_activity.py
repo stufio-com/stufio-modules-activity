@@ -158,7 +158,13 @@ class CRUDUserActivity(
         - Known suspicious IP addresses
         """
         result = False
-        
+
+        sensitive_paths = [
+            settings.API_V1_STR + "/login/*",
+            settings.API_V1_STR + "/users/*",
+            settings.API_V1_STR + "/admin/*",
+        ]
+
         if user_id:
             # Get user security profile
             security_profile = await self.engine.find_one(
@@ -196,7 +202,6 @@ class CRUDUserActivity(
                         security_profile.suspicious_activity_count += 1
                         security_profile.last_suspicious_activity = datetime.utcnow()
                         await self.engine.save(security_profile)
-
                         await self.create_suspicious_activity_log(
                             clickhouse_db=clickhouse_db,
                             user_id=user_id,
@@ -207,13 +212,7 @@ class CRUDUserActivity(
                             status_code=status_code,
                             reason="Too many different IPs used in a short time",
                         )
-
                         result = True
-
-            sensitive_paths = [
-                settings.API_V1_STR + "/login/*",
-                settings.API_V1_STR + "/users/*",
-            ]
 
             for sensitive_path in sensitive_paths:
                 if (sensitive_path[:-1] == '*' and path.startswith(sensitive_path[:-1])) or path == sensitive_path:                
@@ -229,24 +228,24 @@ class CRUDUserActivity(
                         reason=f"New device accessed sensitive endpoint: {sensitive_path}",
                     )
                     result = True
+                    break
 
         # Check for failed login attempts
-        if (
-            path.startswith(settings.API_V1_STR + "/login")
-            and status_code >= 400
-            and method == "POST"
-        ):
-            await self.create_suspicious_activity_log(
-                clickhouse_db=clickhouse_db,
-                user_id=user_id,
-                client_ip=client_ip,
-                user_agent=user_agent,
-                path=path,
-                method=method,
-                status_code=status_code,
-                reason="Failed login attempt",
-            )
-            result = True
+        if status_code >= 400:
+            for sensitive_path in sensitive_paths:
+                if (sensitive_path[:-1] == '*' and path.startswith(sensitive_path[:-1])) or path == sensitive_path:
+                    await self.create_suspicious_activity_log(
+                        clickhouse_db=clickhouse_db,
+                        user_id=user_id,
+                        client_ip=client_ip,
+                        user_agent=user_agent,
+                        path=path,
+                        method=method,
+                        status_code=status_code,
+                        reason="Failed access attempt to sensitive endpoint",
+                    )
+                    result = True
+                    break
 
         return result
 
@@ -276,7 +275,7 @@ class CRUDUserActivity(
             # Create the suspicious activity log entry
             now = datetime.utcnow()
             date = now.replace(hour=0, minute=0, second=0, microsecond=0)
-            
+
             if not user_id:
                 user_id = f"{client_ip}#{user_agent}"
 
@@ -344,7 +343,7 @@ class CRUDUserActivity(
                 f"SELECT count() FROM {UserActivity.get_table_name()} WHERE user_id = {user_id:String}",
                 parameters={"user_id": user_id}
             )
-            
+
             # Convert generator to list before accessing index
             count_results = list(count.named_results())
             total = count_results[0]["count()"] if count_results else 0

@@ -103,16 +103,14 @@ class ActivityTrackingMiddleware(BaseHTTPMiddleware):
             )
 
             # Check for suspicious activity
-            asyncio.create_task(
-                self._check_suspicious_activity(
-                    clickhouse_db=clickhouse_db,
-                    user_id=user_id,
-                    client_ip=client_ip,
-                    user_agent=user_agent,
-                    path=path,
-                    method=method,
-                    status_code=status_code,
-                )
+            await self._check_suspicious_activity(
+                clickhouse_db=clickhouse_db,
+                user_id=user_id,
+                client_ip=client_ip,
+                user_agent=user_agent,
+                path=path,
+                method=method,
+                status_code=status_code,
             )
         except Exception as e:
             logger.error(f"Failed to record activity: {str(e)}")

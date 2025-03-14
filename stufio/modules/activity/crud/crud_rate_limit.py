@@ -663,7 +663,7 @@ class CRUDRateLimit(
                 SELECT 1
                 FROM rate_limit_violations
                 WHERE user_id = {user_id:String}
-                  AND path = {path:String}
+                  AND endpoint = {path:String}
                   AND timestamp >= {recent_time:DateTime}
                   AND type = 'user'
                 LIMIT 1

@@ -1,0 +1,240 @@
+digraph ActivityModuleArchitecture {
+  rankdir=TB;
+  compound=true;
+  node [shape=box, style=filled, fillcolor="#D9EAF7", fontname="Arial", fontsize=11];
+  edge [fontname="Arial", fontsize=9, fontcolor="#666666"];
+
+  // Module Entry Point
+  module [label="ActivityModule\n(activity/__init__.py)", shape=component, fillcolor="#FADBD8"];
+
+  // Core Components
+  subgraph cluster_config {
+    label="Configuration";
+    style=filled;
+    fillcolor="#F5EEF8";
+    config [label="Module Settings\n(activity/config.py)"];
+    version [label="Version\n(activity/__version__.py)"];
+  }
+
+  // Middleware
+  subgraph cluster_middleware {
+    label="Middleware";
+    style=filled;
+    fillcolor="#EBF5FB";
+    
+    activity_tracking [label="ActivityTrackingMiddleware\n(middleware/activity_tracking.py)"];
+    rate_limiter [label="RateLimitingMiddleware\n(middleware/rate_limiter.py)"];
+  }
+
+  // API Layer
+  subgraph cluster_api {
+    label="API Routes";
+    style=filled;
+    fillcolor="#E9F7EF";
+    
+    api_router [label="API Router\n(api/__init__.py)"];
+    
+    activities_api [label="User Activities\n(api/activities.py)"];
+    admin_activities_api [label="Admin Activities\n(api/admin_activities.py)"];
+    security_api [label="Security\n(api/security.py)"];
+    admin_security_api [label="Admin Security\n(api/admin_security.py)"];
+    rate_limits_api [label="Rate Limits\n(api/rate_limits.py)"];
+    admin_analytics_api [label="Admin Analytics\n(api/admin_analytics.py)"];
+  }
+
+  // CRUD Layer
+  subgraph cluster_crud {
+    label="CRUD Operations";
+    style=filled;
+    fillcolor="#FEF9E7";
+    
+    crud_init [label="CRUD Init\n(crud/__init__.py)"];
+    crud_activity [label="CRUDUserActivity\n(crud/crud_activity.py)"];
+    crud_analytics [label="CRUDAnalytics\n(crud/crud_analytics.py)"];
+    crud_rate_limit [label="CRUDRateLimit\n(crud/crud_rate_limit.py)"];
+  }
+
+  // Models
+  subgraph cluster_models {
+    label="Data Models";
+    style=filled;
+    fillcolor="#FDEDEC";
+    
+    activity_models [label="Activity Models\n(models/activity.py)"];
+    analytics_models [label="Analytics Models\n(models/analytics.py)"];
+    rate_limit_models [label="Rate Limit Models\n(models/rate_limit.py)"];
+    security_models [label="Security Models\n(models/security.py)"];
+  }
+
+  // Schemas
+  subgraph cluster_schemas {
+    label="Request/Response Schemas";
+    style=filled;
+    fillcolor="#F4ECF7";
+    
+    activity_schemas [label="Activity Schemas\n(schemas/activity.py)"];
+    analytics_schemas [label="Analytics Schemas\n(schemas/analytics.py)"];
+    rate_limit_schemas [label="Rate Limit Schemas\n(schemas/rate_limit.py)"];
+    security_schemas [label="Security Schemas\n(schemas/security.py)"];
+  }
+
+  // Services
+  subgraph cluster_services {
+    label="Services";
+    style=filled;
+    fillcolor="#EBF5FB";
+    
+    rate_limit_service [label="Rate Limit Service\n(services/rate_limit.py)"];
+  }
+
+  // Database Tables & Collections
+  subgraph cluster_database_schema {
+    label="Database Schema";
+    style=filled;
+    fillcolor="#E8DAEF";
+    
+    subgraph cluster_clickhouse_tables {
+      label="ClickHouse Tables";
+      style=filled;
+      fillcolor="#D6EAF8";
+      node [shape=tab, fillcolor="#AED6F1"];
+      
+      ch_user_activity [label="user_activity\n(Request Logs)"];
+      ch_suspicious_activity [label="user_suspicious_activity\n(Security Events)"];
+      ch_rate_limits [label="rate_limits\n(Rate Limiting)"];
+      ch_rate_limit_violations [label="rate_limit_violations\n(Violation Logs)"];
+      ch_ip_rate_limits [label="ip_rate_limits\n(IP Aggregations)"];
+      ch_user_rate_limits [label="user_rate_limits\n(User Aggregations)"];
+      ch_endpoint_rate_limits [label="endpoint_rate_limits\n(Endpoint Aggregations)"];
+      ch_user_activity_summary [label="user_activity_summary\n(Activity Stats)"];
+      ch_user_activity_path_stat [label="user_activity_path_stat\n(Path Stats)"];
+      ch_user_activity_error_stat [label="user_activity_error_stat\n(Error Stats)"];
+    }
+    
+    subgraph cluster_mongodb_collections {
+      label="MongoDB Collections";
+      style=filled;
+      fillcolor="#D5F5E3";
+      node [shape=folder, fillcolor="#A9DFBF"];
+      
+      mongo_ip_blacklist [label="ip_blacklist\n(Banned IPs)"];
+      mongo_user_rate_limits [label="user_rate_limits\n(Persistent Rate Limits)"];
+      mongo_rate_limit_config [label="rate_limit_config\n(Endpoint Settings)"];
+      mongo_suspicious_activity [label="suspicious_activity\n(Security Alerts)"];
+    }
+  }
+
+  // Tests
+  subgraph cluster_tests {
+    label="Tests";
+    style=filled;
+    fillcolor="#D6EAF8";
+    
+    conftest [label="Test Configuration\n(tests/conftest.py)"];
+    test_api [label="API Tests\n(tests/test_api.py)"];
+  }
+
+  // External Databases
+  subgraph cluster_databases {
+    label="External Services";
+    style=filled;
+    fillcolor="#FCF3CF";
+    node [shape=cylinder, fillcolor="#F9E79F"];
+    
+    mongodb [label="MongoDB"];
+    clickhouse [label="ClickHouse"];
+    redis [label="Redis"];
+  }
+
+  // Framework Components
+  subgraph cluster_framework {
+    label="Stufio Framework";
+    style=filled;
+    fillcolor="#D5F5E3";
+    
+    stufio_config [label="Config"];
+    stufio_api_deps [label="API Dependencies"];
+    stufio_db_mongo [label="MongoDB Client"];
+    stufio_db_clickhouse [label="ClickHouse Client"];
+    stufio_db_redis [label="Redis Client"];
+    stufio_crud_base [label="CRUD Base Classes"];
+  }
+
+  // Connections
+  
+  // Module initialization
+  module -> config;
+  module -> api_router;
+  module -> activity_tracking;
+  module -> rate_limiter;
+  
+  // API Layer relationships
+  api_router -> activities_api;
+  api_router -> admin_activities_api;
+  api_router -> security_api;
+  api_router -> admin_security_api;
+  api_router -> rate_limits_api;
+  api_router -> admin_analytics_api;
+  
+  // CRUD dependencies
+  crud_init -> crud_activity;
+  crud_init -> crud_analytics;
+  crud_init -> crud_rate_limit;
+  
+  // API to CRUD relationships
+  activities_api -> crud_activity [lhead=cluster_crud];
+  admin_activities_api -> crud_activity;
+  admin_activities_api -> crud_analytics;
+  security_api -> crud_activity;
+  admin_security_api -> crud_activity;
+  rate_limits_api -> crud_rate_limit;
+  admin_analytics_api -> crud_analytics;
+  
+  // Models and schemas relationships
+  crud_activity -> activity_models;
+  crud_activity -> security_models;
+  crud_analytics -> analytics_models;
+  crud_rate_limit -> rate_limit_models;
+  
+  activities_api -> activity_schemas;
+  admin_activities_api -> activity_schemas;
+  security_api -> security_schemas;
+  admin_security_api -> security_schemas;
+  rate_limits_api -> rate_limit_schemas;
+  admin_analytics_api -> analytics_schemas;
+  
+  // Middleware relationships
+  activity_tracking -> crud_activity;
+  rate_limiter -> rate_limit_service;
+  rate_limit_service -> crud_rate_limit;
+  
+  // Database connections
+  crud_activity -> mongodb [lhead=cluster_databases];
+  crud_activity -> clickhouse;
+  crud_analytics -> clickhouse;
+  crud_rate_limit -> mongodb;
+  crud_rate_limit -> clickhouse;
+  
+  rate_limit_service -> redis;
+  
+  // Database schema connections
+  clickhouse -> ch_user_activity [lhead=cluster_clickhouse_tables];
+  mongodb -> mongo_ip_blacklist [lhead=cluster_mongodb_collections];
+  
+  // Framework dependencies
+  module -> stufio_config [ltail=cluster_config, lhead=cluster_framework];
+  api_router -> stufio_api_deps;
+  crud_activity -> stufio_crud_base;
+  crud_analytics -> stufio_crud_base;
+  crud_rate_limit -> stufio_crud_base;
+  
+  activity_tracking -> stufio_db_mongo;
+  activity_tracking -> stufio_db_clickhouse;
+  rate_limiter -> stufio_db_mongo;
+  rate_limiter -> stufio_db_clickhouse;
+  rate_limiter -> stufio_db_redis;
+  
+  // Test relationships
+  conftest -> module;
+  test_api -> crud_activity;
+}

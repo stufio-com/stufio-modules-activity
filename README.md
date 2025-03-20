@@ -1,4 +1,4 @@
-# Stufio Activity Module
+# Stufio Framework :: Activity Module
 
 User activity tracking and rate limiting module for the Stufio framework.
 

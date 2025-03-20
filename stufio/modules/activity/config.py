@@ -1,5 +1,4 @@
 from pydantic import BaseModel
-from pymongo import settings
 from stufio.core.config import ModuleSettings, get_settings
 
 settings = get_settings()

@@ -56,11 +56,11 @@ class RateLimitingMiddleware(BaseHTTPMiddleware):
             settings.API_V1_STR + "/openapi.json",
         ]:
             return await call_next(request)
-        
+
         try:
             normalized_path = self._get_route_pattern(raw_path)
             client_ip = self._get_client_ip(request)
-        
+
             db = None
             db_generator = get_db()
 
@@ -76,7 +76,11 @@ class RateLimitingMiddleware(BaseHTTPMiddleware):
             # Get current user if authenticated
             user_id = None
             auth_header = request.headers.get("authorization")
-            if auth_header and auth_header.startswith("Bearer "):
+            if (
+                auth_header
+                and auth_header.startswith("Bearer ")
+                and raw_path not in [settings.API_V1_STR + "/login/claim"]
+            ):
                 token = auth_header.replace("Bearer ", "")
                 try:
                     token_data = deps.get_token_payload(token)

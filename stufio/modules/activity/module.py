@@ -26,12 +26,6 @@ class ActivityModule(ModuleInterface):
         """
         return [(RateLimitingMiddleware, {}, {}), (ActivityTrackingMiddleware, {}, {})]
 
-    # For backwards compatibility
-    def register(self, app: FastAPI) -> None:
-        """Legacy registration method."""
-        self.register_routes(app)
-        # Don't add middleware here anymore
-
     def get_models(self) -> List[Any]:
         """Return this module's database models."""
         return [UserActivity, ClientFingerprint, RateLimit, UserSecurityProfile]

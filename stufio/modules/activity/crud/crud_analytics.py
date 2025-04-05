@@ -1,6 +1,7 @@
 from typing import List, Tuple
 import logging
 from clickhouse_connect.driver.asyncclient import AsyncClient
+from stufio.crud.clickhouse_base import CRUDClickhouse
 from ..models import UserActivity
 from ..schemas import ErrorReport, PathStatistics
 
@@ -11,11 +12,12 @@ class CRUDAnalytics:
     CRUD operations for analytics data in ClickHouse.
     Handles API requests logging, user behavior analysis, and performance metrics.
     """
+    def __init__(self):
+        """Initialize ClickHouse handler"""
+        self.clickhouse = CRUDClickhouse(UserActivity)
 
     async def get_path_statistics(
         self,
-        db: AsyncClient,
-        *,
         path: str = None,
         hours: int = 24
     ) -> List[PathStatistics]:
@@ -23,7 +25,6 @@ class CRUDAnalytics:
         Get statistics for a specific API path or all paths
         
         Args:
-            db: ClickHouse connection
             path: Optional specific path to analyze
             hours: Number of hours to analyze
             
@@ -35,7 +36,7 @@ class CRUDAnalytics:
             if path:
                 where_clause += f" AND path = '{path}'"
 
-            result = await db.query(
+            result = await self.clickhouse.client.query(
                 f"""
                 SELECT 
                     path,
@@ -59,7 +60,6 @@ class CRUDAnalytics:
 
     async def get_error_report(
         self,
-        db: AsyncClient,
         *,
         days: int = 1
     ) -> List[ErrorReport]:
@@ -67,14 +67,13 @@ class CRUDAnalytics:
         Get report of API errors
         
         Args:
-            db: ClickHouse connection
             days: Number of days to analyze
             
         Returns:
             Dict with error report
         """
         try:
-            result = await db.query(
+            result =  await self.clickhouse.client.query(
                 """
                 SELECT 
                     path,

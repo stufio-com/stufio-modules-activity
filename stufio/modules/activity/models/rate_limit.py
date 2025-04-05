@@ -26,7 +26,6 @@ class RateLimitConfig(MongoBase):
         ],
     )
 
-
 class RateLimitOverride(MongoBase):
     """
     Rate limit override for specific users
@@ -87,3 +86,22 @@ class RateLimit(ClickhouseBase):
     endpoint: Optional[str] = None
 
     model_config = ConfigDict(table_name="rate_limits")
+
+
+class UserRateLimit(MongoBase):
+    """User rate limit status stored in MongoDB"""
+    user_id: str
+    is_limited: bool = False
+    reason: Optional[str] = None
+    limited_until: Optional[datetime] = None
+    created_at: datetime = MongoField(default_factory=datetime_now_sec)
+    updated_at: datetime = MongoField(default_factory=datetime_now_sec)
+
+    model_config = ConfigDict(
+        collection="user_rate_limits",
+        indexes=[
+            Index("user_id", unique=True),
+            Index("is_limited"),
+            Index("limited_until"),
+        ],
+    )

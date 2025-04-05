@@ -18,13 +18,12 @@ router = APIRouter()
 async def read_own_activities(
     skip: int = 0,
     limit: int = 100,
-    db: AsyncClient = Depends(deps.get_clickhouse),
     current_user: models.User = Depends(deps.get_current_active_user),
 ) -> PaginatedResponse[UserActivityResponse]:
     """
     Retrieve current user's activity history.
     """
     activities, total = await crud_activity.get_user_activities(
-        db, user_id=str(current_user.id), skip=skip, limit=limit
+        user_id=str(current_user.id), skip=skip, limit=limit
     )
     return PaginatedResponse(items=activities, total=total, skip=skip, limit=limit)

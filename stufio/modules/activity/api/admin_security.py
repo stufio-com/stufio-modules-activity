@@ -20,26 +20,24 @@ router = APIRouter()
 @router.post("/security/block-ip/{ip_address}", response_model=Msg)
 async def admin_block_ip(
     ip_address: str,
-    db: AgnosticDatabase = Depends(deps.get_db),
     current_user: models.User = Depends(deps.get_current_active_superuser),
 ) -> Msg:
     """
     Admin endpoint to block an IP address.
     """
-    await user_activity.block_ip(db, ip_address=ip_address)
+    await user_activity.block_ip(ip_address=ip_address)
     return Msg(msg=f"IP {ip_address} has been blocked")
 
 
 @router.post("/security/restrict-user/{user_id}", response_model=Msg)
 async def admin_restrict_user(
     user_id: str,
-    db: AgnosticDatabase = Depends(deps.get_db),
     current_user: models.User = Depends(deps.get_current_active_superuser),
 ) -> Msg:
     """
     Admin endpoint to restrict a user due to suspicious activity.
     """
-    await user_activity.restrict_user(db, user_id=user_id)
+    await user_activity.restrict_user(user_id=user_id)
     return Msg(msg=f"User {user_id} has been restricted")
 
 
@@ -51,14 +49,13 @@ async def admin_restrict_user(
 async def get_all_suspicious_activities(
     skip: int = 0,
     limit: int = 20,
-    clickhouse_db: AsyncClient = Depends(deps.get_clickhouse),
     current_user: models.User = Depends(deps.get_current_active_superuser),
 ) -> List[SuspiciousActivityResponse]:
     """
     Get all suspicious activities (admin only).
     """
     activities = await user_activity.get_all_suspicious_activities(
-        clickhouse_db, skip=skip, limit=limit
+        skip=skip, limit=limit
     )
     return [SuspiciousActivityResponse(**activity) for activity in activities]
 
@@ -68,12 +65,9 @@ async def get_all_suspicious_activities(
 )
 async def get_security_analytics(
     days: int = Query(30, description="Days of data to analyze"),
-    clickhouse_db: AsyncClient = Depends(deps.get_clickhouse),
     current_user: models.User = Depends(deps.get_current_active_superuser),
 ) -> Any:
     """
     Get analytics on suspicious activities (admin only).
     """
-    return await user_activity.get_suspicious_activity_analytics(
-        clickhouse_db, days=days
-    )
+    return await user_activity.get_suspicious_activity_analytics(days)

@@ -21,7 +21,6 @@ class RateLimitService:
         key: str,
         max_requests: int,
         window_seconds: int,
-        clickhouse_db=None,
         record_type=None,
         record_data=None
     ) -> bool:
@@ -32,7 +31,6 @@ class RateLimitService:
             key: Unique identifier (e.g., "ip:192.168.1.1" or "user:123:path")
             max_requests: Maximum number of requests allowed
             window_seconds: Time window in seconds
-            clickhouse_db: ClickHouse client (optional - for analytics)
             record_type: Type of record (ip, user, endpoint)
             record_data: Additional data to record
             
@@ -65,11 +63,10 @@ class RateLimitService:
             elif cached_value == PREFIX_ALLOWED:
                 is_allowed = True
 
-        if clickhouse_db and record_type and record_data:
+        if record_type and record_data:
             # Record analytics in background
             asyncio.create_task(
                 RateLimitService._record_analytics(
-                    clickhouse_db=clickhouse_db,
                     record_type=record_type,
                     record_data=record_data,
                     max_requests=max_requests,
@@ -83,9 +80,8 @@ class RateLimitService:
                 # Cache a "pass" result for 20 seconds
                 await redis_client.set(redis_key, PREFIX_ALLOWED, ex=CACHE_TTL)
             elif is_allowed == None:
-                if clickhouse_db and record_type and record_data:
+                if record_type and record_data:
                     is_allowed = await RateLimitService._check_limit(
-                        clickhouse_db=clickhouse_db,
                         record_type=record_type,
                         record_data=record_data,
                         window_seconds=window_seconds
@@ -114,7 +110,6 @@ class RateLimitService:
 
     @staticmethod
     async def _record_analytics(
-        clickhouse_db,
         record_type,
         record_data,
         max_requests,
@@ -125,7 +120,6 @@ class RateLimitService:
             # Use appropriate method based on record type
             if record_type == "ip":
                 await crud_rate_limit.update_ip_request_count(
-                    clickhouse_db=clickhouse_db,
                     ip=record_data.get("ip"),
                     max_requests=max_requests,
                     window_seconds=window_seconds
@@ -133,7 +127,6 @@ class RateLimitService:
 
             elif record_type == "user":
                 await crud_rate_limit.update_user_request_count(
-                    clickhouse_db=clickhouse_db,
                     user_id=record_data.get("user_id"),
                     path=record_data.get("path"),
                     max_requests=max_requests,
@@ -142,7 +135,6 @@ class RateLimitService:
 
             elif record_type == "endpoint":
                 await crud_rate_limit.update_endpoint_request_count(
-                    clickhouse_db=clickhouse_db,
                     path=record_data.get("path"),
                     client_ip=record_data.get("ip"),
                     max_requests=max_requests,
@@ -153,20 +145,18 @@ class RateLimitService:
             logger.error(f"Error recording rate limit analytics: {e}")
 
     @staticmethod
-    async def _check_limit(clickhouse_db, record_type, record_data, window_seconds) -> Optional[bool]:
+    async def _check_limit(record_type, record_data, window_seconds) -> Optional[bool]:
         """Record analytics and violations in ClickHouse"""
         try:
             # Use appropriate method based on record type
             if record_type == "ip":
                 return await crud_rate_limit.check_ip_limit(
-                    clickhouse_db=clickhouse_db,
                     ip=record_data.get("ip"),
                     window_seconds=window_seconds
                 )
 
             elif record_type == "user":
                 return await crud_rate_limit.check_user_limit(
-                    clickhouse_db=clickhouse_db,
                     user_id=record_data.get("user_id"),
                     path=record_data.get("path"),
                     window_seconds=window_seconds,
@@ -174,7 +164,6 @@ class RateLimitService:
 
             elif record_type == "endpoint":
                 return await crud_rate_limit.check_endpoint_limit(
-                    clickhouse_db=clickhouse_db,
                     path=record_data.get("path"),
                     client_ip=record_data.get("ip"),
                     window_seconds=window_seconds,

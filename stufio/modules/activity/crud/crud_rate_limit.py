@@ -1,15 +1,10 @@
 import logging
 from datetime import datetime, timedelta
 from typing import Dict, Any, Optional, List, Tuple
-from motor.core import AgnosticDatabase
 from bson import ObjectId
-from clickhouse_connect.driver.asyncclient import AsyncClient
-from stufio.crud.clickhouse_base import CRUDClickhouseBase
-from stufio.crud.mongo_base import CRUDMongoBase
-from ..models import (
-    RateLimitOverride,
-    RateLimit,
-)
+from stufio.crud.clickhouse_base import CRUDClickhouse
+from stufio.crud.mongo_base import CRUDMongo
+from ..models import RateLimitOverride, RateLimit, RateLimitConfig, UserRateLimit
 from ..schemas import RateLimitStatus, ViolationReport, RateLimitConfigResponse
 from stufio.core.config import get_settings
 
@@ -17,15 +12,18 @@ settings = get_settings()
 logger = logging.getLogger(__name__)
 
 
-class CRUDRateLimit(
-    CRUDMongoBase[RateLimit, None, None], CRUDClickhouseBase[RateLimit, None, None]
-):
+class CRUDRateLimit:
     """CRUD operations for rate limits and overrides"""
+
+    def __init__(self):
+        """Initialize both MongoDB and ClickHouse handlers"""
+        self.mongo = CRUDMongo(RateLimitOverride)
+        self.config = CRUDMongo(RateLimitConfig)
+        self.user_limits = CRUDMongo(UserRateLimit)  # Add this line
+        self.clickhouse = CRUDClickhouse(RateLimit)
 
     async def get_user_limit_status(
         self,
-        db: AgnosticDatabase,
-        clickhouse_db: AsyncClient,
         user_id: str,
         path: str,
         max_requests: int,
@@ -37,12 +35,12 @@ class CRUDRateLimit(
         """
         try:
             # Check for override
-            override = await self._get_user_override(db, user_id=user_id, path=path)
+            override = await self._get_user_override(user_id=user_id, path=path)
             if override:
                 now = datetime.utcnow()
                 if override.get("expires_at") and override.get("expires_at") < now:
                     # Override expired, delete it
-                    await db.rate_limit_overrides.delete_one({"_id": override["_id"]})
+                    await self.mongo.remove(override["id"])
                 else:
                     # Use override values
                     max_requests = override.get("max_requests", max_requests)
@@ -52,8 +50,11 @@ class CRUDRateLimit(
             now = datetime.utcnow()
             window_start = now - timedelta(seconds=window_seconds)
 
+            # Get client first
+            client = await self.clickhouse.client
+
             # Query total requests in current window
-            result = await clickhouse_db.query(
+            result = await client.query(
                 """
                 SELECT sum(counter) as total_count,
                        max(window_end) as latest_expiry
@@ -90,7 +91,6 @@ class CRUDRateLimit(
 
     async def _record_violation(
         self,
-        clickhouse_db: AsyncClient,
         key: str,
         type: str,
         limit: int,
@@ -102,6 +102,8 @@ class CRUDRateLimit(
         """Record a rate limit violation in ClickHouse for analysis"""
         try:
             now = datetime.utcnow()
+            # Get client first
+            client = await self.clickhouse.client
 
             data = {
                 "timestamp": now,
@@ -116,7 +118,7 @@ class CRUDRateLimit(
             }
 
             # Insert violation record
-            await clickhouse_db.insert(
+            await client.insert(
                 'rate_limit_violations',
                 [list(data.values())],
                 column_names=list(data.keys())
@@ -127,31 +129,24 @@ class CRUDRateLimit(
 
     async def _get_user_override(
         self,
-        db: AgnosticDatabase,
         user_id: str,
         path: str
     ) -> Optional[Dict[str, Any]]:
         """Get rate limit override for user if exists"""
         # First try exact path match
-        override = await db.rate_limit_overrides.find_one({
-            "user_id": user_id,
-            "path": path
-        })
-
+        override = await self.mongo.get_by_fields(user_id=user_id, path=path)
         if override:
-            return override
+            return override.model_dump()
 
         # Then try wildcard match
-        override = await db.rate_limit_overrides.find_one({
-            "user_id": user_id,
-            "path": "*"
-        })
+        override = await self.mongo.get_by_fields(user_id=user_id, path="*")
+        if override:
+            return override.model_dump()
 
-        return override
+        return None
 
     async def create_user_override(
         self,
-        db: AgnosticDatabase,
         user_id: str,
         path: str,
         max_requests: int,
@@ -162,10 +157,7 @@ class CRUDRateLimit(
     ) -> RateLimitOverride:
         """Create or update a rate limit override for a user"""
         # Check if override already exists
-        existing = await db.rate_limit_overrides.find_one({
-            "user_id": user_id,
-            "path": path
-        })
+        existing = await self.mongo.get_by_fields(user_id=user_id, path=path)
 
         now = datetime.utcnow()
         override_data = {
@@ -181,67 +173,33 @@ class CRUDRateLimit(
 
         if existing:
             # Update existing override
-            await db.rate_limit_overrides.update_one(
-                {"_id": existing["_id"]},
-                {"$set": override_data}
-            )
-            override_id = str(existing["_id"])
+            for key, value in override_data.items():
+                setattr(existing, key, value)
+            return await self.mongo.update(existing, override_data)
         else:
             # Create new override
-            result = await db.rate_limit_overrides.insert_one(override_data)
-            override_id = str(result.inserted_id)
-
-        # Return the complete override
-        return RateLimitOverride(
-            id=override_id,
-            user_id=user_id,
-            path=path,
-            max_requests=max_requests,
-            window_seconds=window_seconds,
-            created_at=now,
-            expires_at=expires_at,
-            created_by=created_by,
-            reason=reason
-        )
+            return await self.mongo.create(RateLimitOverride(**override_data))
 
     async def get_overrides(
         self,
-        db: AgnosticDatabase,
         user_id: Optional[str] = None
     ) -> List[RateLimitOverride]:
         """Get all rate limit overrides, optionally filtered by user_id"""
-        query = {}
         if user_id:
-            query["user_id"] = user_id
-
-        overrides = await db.rate_limit_overrides.find(query).to_list(length=1000)
-
-        # Convert to model objects
-        result = []
-        for override in overrides:
-            override_dict = {k: v for k, v in override.items() if k != '_id'}
-            override_dict['id'] = str(override['_id'])
-            result.append(RateLimitOverride(**override_dict))
-
-        return result
+            return await self.mongo.get_multi(user_id=user_id)
+        else:
+            return await self.mongo.get_multi(skip=0, limit=1000)
 
     async def delete_override(
         self,
-        db: AgnosticDatabase,
         override_id: str
     ) -> bool:
         """Delete a rate limit override"""
-        try:
-            object_id = ObjectId(override_id)
-        except:
-            return False
-
-        result = await db.rate_limit_overrides.delete_one({"_id": object_id})
-        return result.deleted_count > 0
+        result = await self.mongo.remove(override_id)
+        return result is not None
 
     async def get_violations(
         self,
-        clickhouse_db: AsyncClient,
         skip: int = 0,
         limit: int = 50,
         start_date: Optional[datetime] = None,
@@ -275,8 +233,11 @@ class CRUDRateLimit(
             parameters["limit"] = limit
             parameters["skip"] = skip
 
+            # Get client first
+            client = await self.clickhouse.client
+
             # Execute query
-            result = await clickhouse_db.query(
+            result = await client.query(
                 f"""
                 SELECT
                     timestamp,
@@ -305,13 +266,15 @@ class CRUDRateLimit(
 
     async def get_rate_limit_analytics(
         self,
-        clickhouse_db: AsyncClient,
         days: int = 7
     ) -> Dict[str, Any]:
         """Get rate limit analytics from ClickHouse"""
         try:
+            # Get client first
+            client = await self.clickhouse.client
+
             # Get summary stats from materialized views
-            summary = await clickhouse_db.query(
+            summary = await client.query(
                 """
                 SELECT
                     countMerge(request_count) AS total_requests,
@@ -321,9 +284,9 @@ class CRUDRateLimit(
                 """,
                 parameters={"days": days}
             )
-            
+
             # Get violations stats
-            violations = await clickhouse_db.query(
+            violations = await client.query(
                 """
                 SELECT
                     count() AS total_violations,
@@ -338,7 +301,7 @@ class CRUDRateLimit(
             )
 
             # Get violations by type
-            by_type = await clickhouse_db.query(
+            by_type = await client.query(
                 """
                 SELECT
                     type,
@@ -348,11 +311,11 @@ class CRUDRateLimit(
                 GROUP BY type
                 ORDER BY count DESC
                 """,
-                parameters={"days": days}
+                parameters={"days": days},
             )
 
             # Get top offenders (IPs)
-            top_ips = await clickhouse_db.query(
+            top_ips = await client.query(
                 """
                 SELECT
                     client_ip,
@@ -363,11 +326,11 @@ class CRUDRateLimit(
                 ORDER BY violations DESC
                 LIMIT 10
                 """,
-                parameters={"days": days}
+                parameters={"days": days},
             )
 
             # Get violations by day
-            by_day = await clickhouse_db.query(
+            by_day = await client.query(
                 """
                 SELECT
                     date,
@@ -377,11 +340,11 @@ class CRUDRateLimit(
                 GROUP BY date
                 ORDER BY date
                 """,
-                parameters={"days": days}
+                parameters={"days": days},
             )
-            
+
             # Get materialized view stats (how many requests were tracked)
-            view_stats = await clickhouse_db.query(
+            view_stats = await client.query(
                 """
                 SELECT 
                     'ip' as view_type, 
@@ -405,7 +368,7 @@ class CRUDRateLimit(
                 FROM endpoint_rate_limits 
                 WHERE minute >= now() - interval {days:UInt32} day
                 """,
-                parameters={"days": days}
+                parameters={"days": days},
             )
 
             return {
@@ -427,49 +390,60 @@ class CRUDRateLimit(
                 "view_stats": []
             }
 
-
     async def get_rate_limit_config(
         self,
-        db: AgnosticDatabase,
         *,
         endpoint: str
     ) -> Optional[Dict[str, Any]]:
         """Get rate limit configuration for an endpoint from MongoDB"""
-        # Try prefix matching (for nested endpoints)
-        cursor = db.rate_limit_configs.find(
-            {"active": True}, {"_id":0, "endpoint": 1}
-        ).sort("endpoint", -1)  # Sort by endpoint length descending
+        try:
+            # Get engine from config CRUD
+            cursor = (
+                self.config.engine.get_collection(RateLimitConfig)
+                .find({"active": True})
+                .sort("endpoint", -1)
+            )
 
-        async for cfg in cursor:
-            if (cfg["endpoint"][-1:] == '*' and endpoint.startswith(cfg["endpoint"][:-1])) or endpoint == cfg["endpoint"]:
-                # Found a matching config
-                return cfg
+            # Find the best matching configuration
+            async for cfg in cursor:
+                if (cfg["endpoint"][-1:] == '*' and endpoint.startswith(cfg["endpoint"][:-1])) or endpoint == cfg["endpoint"]:
+                    # Found a matching config
+                    return cfg
 
-        # No specific config found
-        return None
+            # No specific config found
+            return None
+        except Exception as e:
+            logger.error(f"Error fetching rate limit config: {str(e)}")
+            return None
 
     async def get_all_rate_limit_configs(
         self,
-        db: AgnosticDatabase,
         *,
         skip: int = 0,
         limit: int = 100,
         active_only: bool = False,
     ) -> List[RateLimitConfigResponse]:
         """Get all rate limit configurations"""
-        query = {"active": True} if active_only else {}
-        cursor = db.rate_limit_configs.find(query).sort("endpoint", 1).skip(skip).limit(limit)
-        configs = await cursor.to_list(length=limit)
+        try:
+            # Get the collection name properly
+            collection_name = RateLimitConfig.model_config.get("collection", "rate_limit_configs")
 
-        # Convert ObjectId to string for each document
-        for config in configs:
-            config["id"] = str(config.pop("_id"))
+            query = {"active": True} if active_only else {}
+            engine = self.config.engine
+            cursor = await engine.get_collection(collection_name).find(query).sort("endpoint", 1).skip(skip).limit(limit)
+            configs = await cursor.to_list(length=limit)
 
-        return [RateLimitConfigResponse(**config) for config in configs]
+            # Convert ObjectId to string for each document
+            for config in configs:
+                config["id"] = str(config.pop("_id"))
+
+            return [RateLimitConfigResponse(**config) for config in configs]
+        except Exception as e:
+            logger.error(f"Error fetching rate limit configs: {str(e)}")
+            return []
 
     async def create_rate_limit_config(
         self,
-        db: AgnosticDatabase,
         *,
         endpoint: str,
         max_requests: int,
@@ -479,41 +453,58 @@ class CRUDRateLimit(
         active: bool = True,
     ) -> RateLimitConfigResponse:
         """Create or update a rate limit configuration"""
-        now = datetime.utcnow()
-        config = {
-            "endpoint": endpoint,
-            "max_requests": max_requests,
-            "window_seconds": window_seconds,
-            "active": active,
-            "bypass_roles": bypass_roles or [],
-            "description": description,
-            "created_at": now,
-            "updated_at": now
-        }
+        try:
+            # Get the collection name properly
+            collection_name = RateLimitConfig.model_config.get("collection", "rate_limit_configs")
 
-        # Check if config already exists
-        existing = await db.rate_limit_configs.find_one(
-            {"endpoint": endpoint}
-        )
+            now = datetime.utcnow()
+            config_data = {
+                "endpoint": endpoint,
+                "max_requests": max_requests,
+                "window_seconds": window_seconds,
+                "active": active,
+                "bypass_roles": bypass_roles or [],
+                "description": description,
+                "created_at": now,
+                "updated_at": now
+            }
 
-        if existing:
-            # Update existing config
-            config["created_at"] = existing.get("created_at", now)
-            result = await db.rate_limit_configs.update_one(
-                {"_id": existing["_id"]},
-                {"$set": {**config, "updated_at": now}}
+            # Check if config already exists
+            engine = self.config.engine
+            existing = await engine.get_collection(collection_name).find_one(
+                {"endpoint": endpoint}
             )
-            config["id"] = str(existing["_id"])
-        else:
-            # Create new config
-            result = await db.rate_limit_configs.insert_one(config)
-            config["id"] = str(result.inserted_id)
 
-        return RateLimitConfigResponse(**config)
+            if existing:
+                # Update existing config
+                config_data["created_at"] = existing.get("created_at", now)
+                result = await engine.get_collection(collection_name).update_one(
+                    {"_id": existing["_id"]}, {"$set": {**config_data, "updated_at": now}}
+                )
+                config_data["id"] = str(existing["_id"])
+            else:
+                # Create new config
+                result = await engine.get_collection(collection_name).insert_one(config_data)
+                config_data["id"] = str(result.inserted_id)
+
+            return RateLimitConfigResponse(**config_data)
+        except Exception as e:
+            logger.error(f"Error creating rate limit config: {str(e)}")
+            # Return minimal valid response
+            return RateLimitConfigResponse(
+                id="error",
+                endpoint=endpoint,
+                max_requests=max_requests,
+                window_seconds=window_seconds,
+                active=active,
+                bypass_roles=bypass_roles or [],
+                description=description,
+                created_at=datetime.utcnow(),
+                updated_at=datetime.utcnow()
+            )
 
     async def update_rate_limit_config(
         self,
-        db: AgnosticDatabase,
         *,
         config_id: str,
         max_requests: Optional[int] = None,
@@ -524,69 +515,81 @@ class CRUDRateLimit(
     ) -> Optional[Dict[str, Any]]:
         """Update a rate limit configuration"""
         try:
+            # Get the collection name properly
+            collection_name = RateLimitConfig.model_config.get("collection", "rate_limit_configs")
+
             object_id = ObjectId(config_id)
-        except:
+            update_data = {"updated_at": datetime.utcnow()}
+
+            if max_requests is not None:
+                update_data["max_requests"] = max_requests
+
+            if window_seconds is not None:
+                update_data["window_seconds"] = window_seconds
+
+            if active is not None:
+                update_data["active"] = active
+
+            if bypass_roles is not None:
+                update_data["bypass_roles"] = bypass_roles
+
+            if description is not None:
+                update_data["description"] = description
+
+            engine = self.config.engine
+            result = await engine.get_collection(collection_name).update_one(
+                {"_id": object_id}, {"$set": update_data}
+            )
+
+            if result.matched_count == 0:
+                return None
+
+            # Get updated document
+            updated = await engine.get_collection(collection_name).find_one(
+                {"_id": object_id}
+            )
+            if updated:
+                updated["id"] = str(updated.pop("_id"))
+
+            return RateLimitConfigResponse(**updated)
+        except Exception as e:
+            logger.error(f"Error updating rate limit config: {str(e)}")
             return None
-
-        update_data = {"updated_at": datetime.utcnow()}
-
-        if max_requests is not None:
-            update_data["max_requests"] = max_requests
-
-        if window_seconds is not None:
-            update_data["window_seconds"] = window_seconds
-
-        if active is not None:
-            update_data["active"] = active
-
-        if bypass_roles is not None:
-            update_data["bypass_roles"] = bypass_roles
-
-        if description is not None:
-            update_data["description"] = description
-
-        result = await db.rate_limit_configs.update_one(
-            {"_id": object_id},
-            {"$set": update_data}
-        )
-
-        if result.matched_count == 0:
-            return None
-
-        # Get updated document
-        updated = await db.rate_limit_configs.find_one({"_id": object_id})
-        if updated:
-            updated["id"] = str(updated.pop("_id"))
-
-        return RateLimitConfigResponse(**updated)
 
     async def delete_rate_limit_config(
         self,
-        db: AgnosticDatabase,
         *,
         config_id: str
     ) -> bool:
         """Delete a rate limit configuration"""
         try:
-            object_id = ObjectId(config_id)
-        except:
-            return False
+            # Get the collection name properly
+            collection_name = RateLimitConfig.model_config.get("collection", "rate_limit_configs")
 
-        result = await db.rate_limit_configs.delete_one({"_id": object_id})
-        return result.deleted_count > 0
+            object_id = ObjectId(config_id)
+            engine = self.config.engine
+            result = await engine.get_collection(collection_name).delete_one(
+                {"_id": object_id}
+            )
+            return result.deleted_count > 0
+        except Exception as e:
+            logger.error(f"Error deleting rate limit config: {str(e)}")
+            return False
 
     async def check_ip_limit(
         self, 
-        clickhouse_db: AsyncClient,
         *,
         ip: str,
         window_seconds: int
     ) -> bool:
         """Quickly check if an IP is already rate limited based on recent violations"""
         try:
+            # Get client first
+            client = await self.clickhouse.client
+
             # First, check for recent violations (super fast)
             recent_time = datetime.utcnow() - timedelta(seconds=window_seconds)
-            result = await clickhouse_db.query(
+            result = await client.query(
                 """
                 SELECT 1
                 FROM rate_limit_violations
@@ -597,11 +600,11 @@ class CRUDRateLimit(
                 """,
                 parameters={"ip": ip, "recent_time": recent_time},
             )
-            
+
             # If a violation exists, block immediately
             if result.row_count > 0:
                 return False
-                
+
             # Otherwise, let it pass and do detailed checking in background
             return True
         except Exception as e:
@@ -610,7 +613,6 @@ class CRUDRateLimit(
 
     async def update_ip_request_count(
         self,
-        clickhouse_db: AsyncClient,
         *,
         ip: str,
         max_requests: int,
@@ -618,8 +620,11 @@ class CRUDRateLimit(
     ) -> None:
         """Update IP request count and record violations in background"""
         try:
+            # Get client first
+            client = await self.clickhouse.client
+
             # Check if request count exceeds limit
-            result = await clickhouse_db.query(
+            result = await client.query(
                 """
                 SELECT countMerge(request_count) as count
                 FROM ip_rate_limits
@@ -628,15 +633,14 @@ class CRUDRateLimit(
                 """,
                 parameters={"ip": ip, "window": window_seconds},
             )
-            
+
             # Process results
             count_results = list(result.named_results())
             count = count_results[0]["count"] if count_results else 0
-            
+
             # Record violation if limit exceeded
             if count >= max_requests:
                 await self._record_violation(
-                    clickhouse_db=clickhouse_db,
                     key=f"ip:{ip}",
                     type="ip",
                     limit=max_requests,
@@ -645,10 +649,9 @@ class CRUDRateLimit(
                 )
         except Exception as e:
             logger.error(f"Error in background IP tracking: {str(e)}")
-    
+
     async def check_user_limit(
         self,
-        clickhouse_db: AsyncClient,
         *,
         user_id: str,
         path: str,
@@ -656,9 +659,12 @@ class CRUDRateLimit(
     ) -> bool:
         """Quickly check if a user is already rate limited based on recent violations"""
         try:
+            # Get client first
+            client = await self.clickhouse.client
+
             # First, check for recent violations (super fast)
             recent_time = datetime.utcnow() - timedelta(seconds=window_seconds)
-            result = await clickhouse_db.query(
+            result = await client.query(
                 """
                 SELECT 1
                 FROM rate_limit_violations
@@ -670,11 +676,11 @@ class CRUDRateLimit(
                 """,
                 parameters={"user_id": user_id, "path": path, "recent_time": recent_time},
             )
-            
+
             # If a violation exists, block immediately
             if result.row_count > 0:
                 return False
-                
+
             # Otherwise, let it pass and do detailed checking in background
             return True
         except Exception as e:
@@ -683,7 +689,6 @@ class CRUDRateLimit(
 
     async def update_user_request_count(
         self,
-        clickhouse_db: AsyncClient,
         *,
         user_id: str,
         path: str,
@@ -692,8 +697,11 @@ class CRUDRateLimit(
     ) -> None:
         """Update user request count and record violations in background"""
         try:
+            # Get client first
+            client = await self.clickhouse.client
+
             # Query the user-specific materialized view for detailed check
-            result = await clickhouse_db.query(
+            result = await client.query(
                 """
                 SELECT countMerge(request_count) as count
                 FROM user_rate_limits
@@ -703,15 +711,14 @@ class CRUDRateLimit(
                 """,
                 parameters={"user_id": user_id, "path": path, "window": window_seconds},
             )
-            
+
             # Process results
             count_results = list(result.named_results())
             count = count_results[0]["count"] if count_results else 0
-            
+
             # Record violation if limit exceeded
             if count >= max_requests:
                 await self._record_violation(
-                    clickhouse_db=clickhouse_db,
                     key=f"user:{user_id}:{path}",
                     type="user",
                     limit=max_requests,
@@ -724,7 +731,6 @@ class CRUDRateLimit(
 
     async def check_endpoint_limit(
         self,
-        clickhouse_db: AsyncClient,
         *,
         path: str,
         client_ip: str,
@@ -732,9 +738,12 @@ class CRUDRateLimit(
     ) -> bool:
         """Quickly check if an endpoint is already rate limited for this IP based on recent violations"""
         try:
+            # Get client first
+            client = await self.clickhouse.client
+
             # First, check for recent violations (super fast)
             recent_time = datetime.utcnow() - timedelta(seconds=window_seconds)
-            result = await clickhouse_db.query(
+            result = await client.query(
                 """
                 SELECT 1
                 FROM rate_limit_violations
@@ -746,11 +755,11 @@ class CRUDRateLimit(
                 """,
                 parameters={"ip": client_ip, "path": path, "recent_time": recent_time},
             )
-            
+
             # If a violation exists, block immediately
             if result.row_count > 0:
                 return False
-                
+
             # Otherwise, let it pass and do detailed checking in background
             return True
         except Exception as e:
@@ -759,7 +768,6 @@ class CRUDRateLimit(
 
     async def update_endpoint_request_count(
         self,
-        clickhouse_db: AsyncClient,
         *,
         path: str,
         client_ip: str,
@@ -768,8 +776,11 @@ class CRUDRateLimit(
     ) -> None:
         """Update endpoint request count and record violations in background"""
         try:
+            # Get client first
+            client = await self.clickhouse.client
+
             # Query the endpoint-specific materialized view for detailed check
-            result = await clickhouse_db.query(
+            result = await client.query(
                 """
                 SELECT countMerge(request_count) as count
                 FROM endpoint_rate_limits
@@ -779,15 +790,14 @@ class CRUDRateLimit(
                 """,
                 parameters={"path": path, "ip": client_ip, "window": window_seconds},
             )
-            
+
             # Process results
             count_results = list(result.named_results())
             count = count_results[0]["count"] if count_results else 0
-            
+
             # Record violation if limit exceeded
             if count >= max_requests:
                 await self._record_violation(
-                    clickhouse_db=clickhouse_db,
                     key=f"endpoint:{path}:{client_ip}",
                     type="endpoint",
                     limit=max_requests,
@@ -798,28 +808,8 @@ class CRUDRateLimit(
         except Exception as e:
             logger.error(f"Error in background endpoint tracking: {str(e)}")
 
-    async def get_rate_limit_config(self, db: AgnosticDatabase, *, endpoint: str) -> Optional[Dict[str, Any]]:
-        """Get rate limit configuration for an endpoint"""
-        try:
-            # Try to find exact match first
-            config = await db.rate_limit_configs.find_one({"endpoint": endpoint, "active": True})
-            
-            # If no exact match, try to find wildcard match
-            if not config:
-                # Get global default
-                config = await db.rate_limit_configs.find_one({"endpoint": "*", "active": True})
-                
-            return config
-        except Exception as e:
-            logger.error(f"Error fetching rate limit config: {str(e)}")
-            return None
-
-    # Methods for checking and working with user_rate_limits MongoDB collection
-    
     async def set_user_rate_limited(
         self,
-        db: AgnosticDatabase,
-        *,
         user_id: str,
         reason: str,
         duration_minutes: int = 60
@@ -828,65 +818,72 @@ class CRUDRateLimit(
         try:
             limited_until = datetime.utcnow() + timedelta(minutes=duration_minutes)
             
-            result = await db.user_rate_limits.update_one(
-                {"user_id": user_id},
-                {
-                    "$set": {
-                        "is_limited": True,
-                        "reason": reason,
-                        "limited_until": limited_until,
-                        "updated_at": datetime.utcnow()
-                    }
-                },
-                upsert=True
-            )
+            # Try to get existing record
+            record = await self.user_limits.get_by_fields(user_id=user_id)
             
-            return result.modified_count > 0 or result.upserted_id is not None
+            if record:
+                # Update existing record
+                record.is_limited = True
+                record.reason = reason
+                record.limited_until = limited_until
+                record.updated_at = datetime.utcnow()
+                await self.user_limits.update(record)
+                return True
+            else:
+                # Create new record
+                new_record = UserRateLimit(
+                    user_id=user_id,
+                    is_limited=True,
+                    reason=reason,
+                    limited_until=limited_until
+                )
+                await self.user_limits.create(new_record)
+                return True
+                
         except Exception as e:
             logger.error(f"Error setting user rate limit: {str(e)}")
             return False
 
     async def remove_user_rate_limit(
         self,
-        db: AgnosticDatabase,
-        *,
         user_id: str
     ) -> bool:
         """Remove rate limit from a user"""
         try:
-            result = await db.user_rate_limits.update_one(
-                {"user_id": user_id},
-                {
-                    "$set": {
-                        "is_limited": False,
-                        "updated_at": datetime.utcnow()
-                    },
-                    "$unset": {
-                        "reason": "",
-                        "limited_until": ""
-                    }
-                }
-            )
+            # Get existing record
+            record = await self.user_limits.get_by_fields(user_id=user_id)
             
-            return result.modified_count > 0
+            if record:
+                record.is_limited = False
+                record.reason = None
+                record.limited_until = None
+                record.updated_at = datetime.utcnow()
+                await self.user_limits.update(record)
+                return True
+            
+            return False
         except Exception as e:
             logger.error(f"Error removing user rate limit: {str(e)}")
             return False
 
     async def is_user_rate_limited(
         self,
-        db: AgnosticDatabase,
-        *,
         user_id: str
     ) -> Tuple[bool, Optional[str]]:
         """Check if a user is rate limited from MongoDB record"""
         try:
-            record = await db.user_rate_limits.find_one({"user_id": user_id})
-            if record and record.get("is_limited", False):
+            # Use the proper model through our CRUD helper
+            record = await self.user_limits.get_by_fields(user_id=user_id)
+            
+            if record and record.is_limited:
                 # Check if limitation has expired
-                limited_until = record.get("limited_until")
-                if limited_until and limited_until > datetime.utcnow():
-                    return True, record.get("reason", "Rate limited")
+                if record.limited_until and record.limited_until > datetime.utcnow():
+                    return True, record.reason or "Rate limited"
+                else:
+                    # Limitation has expired, update the record
+                    record.is_limited = False
+                    await self.user_limits.update(record)
+                    
             return False, None
         except Exception as e:
             logger.error(f"Error checking user rate limit status: {str(e)}")
@@ -894,4 +891,4 @@ class CRUDRateLimit(
 
 
 # Create singleton instance
-crud_rate_limit = CRUDRateLimit(RateLimit)
+crud_rate_limit = CRUDRateLimit()

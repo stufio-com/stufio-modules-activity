@@ -1,34 +1,35 @@
 from datetime import datetime, timedelta
 import hashlib
-from typing import List, Optional, Dict, Any, Tuple
-from stufio.db.mongo import get_engine
-from bson.objectid import ObjectId
-from clickhouse_connect.driver.asyncclient import AsyncClient
-from ..models import IPBlacklist, SuspiciousActivity, UserActivitySummary, UserActivity, ClientFingerprint, UserSecurityProfile
-from ..schemas import TrustedDeviceCreate
-from motor.core import AgnosticDatabase
-from stufio.crud.clickhouse_base import CRUDClickhouseBase
-from stufio.crud.mongo_base import CRUDMongoBase
-from stufio.core.config import get_settings
 import logging
+from typing import List, Optional, Dict, Any, Tuple
+from odmantic import ObjectId
+import uuid
+
+from stufio.core.config import get_settings
+from stufio.crud.mongo_base import CRUDMongo
+from stufio.crud.clickhouse_base import CRUDClickhouse
+from stufio.db.clickhouse_base import datetime_now_sec
+from ..models import (
+    IPBlacklist, UserActivity, UserSecurityProfile, 
+    ClientFingerprint, SuspiciousActivity
+)
+from ..schemas import TrustedDeviceCreate, UserActivitySummary
 
 settings = get_settings()
 logger = logging.getLogger(__name__)
 
+class CRUDUserActivity:
+    """CRUD for UserActivity with both MongoDB and ClickHouse support"""
 
-class CRUDUserActivity(
-    CRUDMongoBase[UserActivity, None, None], CRUDClickhouseBase[UserActivity, None, None]
-):
-
-    async def initialize(self):
-        """Initialize async resources"""
-        # Get the engine for MongoDB
-        self.engine = get_engine()
-        return self
+    def __init__(self):
+        """Initialize both MongoDB and ClickHouse handlers"""
+        self.security_profiles = CRUDMongo(UserSecurityProfile)
+        self.ip_blacklist = CRUDMongo(IPBlacklist)
+        self.activity = CRUDClickhouse(UserActivity)
+        self.suspicious = CRUDClickhouse(SuspiciousActivity)
 
     async def create_activity(
         self,
-        db: AsyncClient,
         *,
         user_id: Optional[str],
         path: str,
@@ -38,31 +39,21 @@ class CRUDUserActivity(
         status_code: int,
         process_time: float,
     ) -> bool:
-        """
-        Record an API request in ClickHouse for analytics
-
-        Args:
-            db: ClickHouse connection
-            user_id: User ID if authenticated, `{client_id}#{user_agent}` otherwise
-            path: API path
-            method: HTTP method (GET, POST, etc.)
-            client_ip: Client IP address
-            user_agent: User agent string
-            status_code: HTTP status code
-            process_time: Request processing time in seconds
-            is_authenticated: Whether the request was authenticated
-
-        Returns:
-            bool: Success status
-        """
+        """Record an API request in ClickHouse for analytics"""
         try:
-            # Format timestamp for ClickHouse
-            is_authenticated = True if user_id else False
-            if not user_id:
-                user_id = f"{client_ip}#{user_agent}"
+            is_authenticated = bool(user_id)
+            effective_user_id = user_id if user_id else f"anon-{client_ip}"
 
+            # Generate a unique ID for this activity
+            event_id = str(uuid.uuid4())
+            current_time = datetime_now_sec()
+            
+            # Create the activity record with explicit timestamp and ID
             api_request = UserActivity(
-                user_id=user_id,
+                event_id=event_id,  # Set explicit ID
+                timestamp=current_time,  # Set explicit timestamp
+                date=current_time.replace(hour=0, minute=0, second=0, microsecond=0),
+                user_id=effective_user_id,
                 path=path,
                 method=method,
                 client_ip=client_ip,
@@ -72,26 +63,57 @@ class CRUDUserActivity(
                 is_authenticated=is_authenticated,
             )
 
-            # Convert to dict and use for insert
-            data = api_request.dict_for_insert()
-
-            await db.insert(
-                api_request.get_table_name(),
-                [list(data.values())],
-                column_names=list(data.keys()),
+            # Use the dict_for_insert method to ensure proper data formatting
+            insert_data = api_request.dict_for_insert()
+            
+            # Get the ClickHouse client directly for more control
+            client = await self.activity.client
+            
+            # Extract column names and values for explicit insertion
+            columns = list(insert_data.keys())
+            values = [list(insert_data.values())]
+            
+            # Insert using explicit column names
+            await client.insert(
+                UserActivity.get_table_name(),
+                values,
+                column_names=columns  # Explicitly specify column names
             )
-
+            
             # Update user security profile if this is an authenticated user
             if is_authenticated:
-                await self._update_user_security_profile(
-                    user_id=user_id,
-                    client_ip=client_ip,
-                    user_agent=user_agent
-                )
+                await self._update_user_security_profile(effective_user_id, client_ip, user_agent)
 
             return True
         except Exception as e:
-            logger.error(f"Error recording API request in ClickHouse: {str(e)}")
+            logger.error(f"Error recording API request in ClickHouse: {str(e)}", exc_info=True)
+            
+            # Add diagnostics to help debug the issue
+            try:
+                if 'insert_data' in locals():
+                    logger.debug(f"Insert data: {insert_data}")
+                    
+                # Get actual table structure
+                schema_result = await client.query(f"DESCRIBE TABLE {UserActivity.get_table_name()}")
+                schema_columns = [row[0] for row in schema_result.result_rows]
+                logger.debug(f"ClickHouse table columns: {schema_columns}")
+                
+                if 'insert_data' in locals():
+                    logger.debug(f"Data columns: {list(insert_data.keys())}")
+                    
+                    # Show differences
+                    table_set = set(schema_columns)
+                    data_set = set(insert_data.keys())
+                    missing_in_data = table_set - data_set
+                    extra_in_data = data_set - table_set
+                    
+                    if missing_in_data:
+                        logger.error(f"Columns in table but missing in data: {missing_in_data}")
+                    if extra_in_data:
+                        logger.error(f"Columns in data but missing in table: {extra_in_data}")
+            except Exception as debug_e:
+                logger.error(f"Error during diagnostics: {debug_e}")
+                
             return False
 
     async def _update_user_security_profile(
@@ -102,11 +124,10 @@ class CRUDUserActivity(
     ) -> None:
         """Update the user's security profile with this client info"""
         # Get or create security profile
-        security_profile = await self.engine.find_one(
-            UserSecurityProfile, UserSecurityProfile.user_id == user_id
-        )
+        security_profile = await self.security_profiles.get_by_field("user_id", user_id)
 
         if not security_profile:
+            # Create new profile
             security_profile = UserSecurityProfile(
                 user_id=user_id,
                 known_fingerprints=[
@@ -116,7 +137,7 @@ class CRUDUserActivity(
                     )
                 ]
             )
-            await self.engine.save(security_profile)
+            await self.security_profiles.create(security_profile)
             return
 
         # Check if this fingerprint exists
@@ -138,11 +159,15 @@ class CRUDUserActivity(
                 )
             )
 
-        await self.engine.save(security_profile)
+        # Update the profile - EXCLUDE ID FIELD
+        update_data = security_profile.model_dump(exclude={"id"})
+        try:
+            await self.security_profiles.update(security_profile, update_data)
+        except Exception as e:
+            logger.error(f"Error updating security profile: {e}", exc_info=True)
 
     async def check_suspicious_activity(
         self,
-        clickhouse_db: AsyncClient,
         *,
         user_id: Optional[str],
         client_ip: str,
@@ -151,14 +176,8 @@ class CRUDUserActivity(
         method: str,
         status_code: int,
     ) -> bool:
-        """
-        Check if this activity appears suspicious based on:
-        - New IP/device combination
-        - Too many different IPs in short time
-        - Known suspicious IP addresses
-        """
+        """Check if this activity appears suspicious"""
         result = False
-
         sensitive_paths = [
             settings.API_V1_STR + "/login/*",
             settings.API_V1_STR + "/users/*",
@@ -167,10 +186,7 @@ class CRUDUserActivity(
 
         if user_id:
             # Get user security profile
-            security_profile = await self.engine.find_one(
-                UserSecurityProfile,
-                UserSecurityProfile.user_id == user_id
-            )
+            security_profile = await self.security_profiles.get_by_field("user_id", user_id)
 
             if security_profile:
                 # Check if this is a known fingerprint
@@ -185,25 +201,36 @@ class CRUDUserActivity(
                 if not known_fingerprint:
                     # Get recent activities for this user
                     recent_time = datetime.utcnow() - timedelta(hours=24)
-                    activities = await self.engine.find(
-                        UserActivity,
-                        (UserActivity.user_id == user_id) & 
-                        (UserActivity.timestamp > recent_time)
+
+                    # Query ClickHouse directly
+                    ch_client = await self.activity.client
+                    activities = await ch_client.query(
+                        f"""
+                        SELECT DISTINCT client_ip
+                        FROM {UserActivity.get_table_name()}
+                        WHERE user_id = {{user_id:String}}
+                        AND timestamp > {{recent_time:DateTime}}
+                        """,
+                        parameters={
+                            "user_id": user_id,
+                            "recent_time": recent_time
+                        }
                     )
 
-                    # Count unique IP addresses
-                    unique_ips = set()
-                    for activity in activities:
-                        unique_ips.add(activity.client_ip)
+                    # Get unique IPs from result
+                    unique_ips = set(row[0] for row in activities.result_rows)
 
                     # If too many unique IPs, mark as suspicious
                     if len(unique_ips) > settings.activity_SECURITY_MAX_UNIQUE_IPS_PER_DAY:
                         # Update security profile
                         security_profile.suspicious_activity_count += 1
                         security_profile.last_suspicious_activity = datetime.utcnow()
-                        await self.engine.save(security_profile)
+                        await self.security_profiles.update(
+                            security_profile,
+                            security_profile.model_dump()
+                        )
+
                         await self.create_suspicious_activity_log(
-                            clickhouse_db=clickhouse_db,
                             user_id=user_id,
                             client_ip=client_ip,
                             user_agent=user_agent,
@@ -214,11 +241,11 @@ class CRUDUserActivity(
                         )
                         result = True
 
+            # Check for sensitive path access
             for sensitive_path in sensitive_paths:
-                if (sensitive_path[:-1] == '*' and path.startswith(sensitive_path[:-1])) or path == sensitive_path:                
-                    # Log suspicious activity - now using ClickHouse
+                if (sensitive_path.endswith('*') and path.startswith(sensitive_path[:-1])) or path == sensitive_path:                
+                    # Log suspicious activity
                     await self.create_suspicious_activity_log(
-                        clickhouse_db=clickhouse_db,
                         user_id=user_id,
                         client_ip=client_ip,
                         user_agent=user_agent,
@@ -233,9 +260,8 @@ class CRUDUserActivity(
         # Check for failed login attempts
         if status_code >= 400:
             for sensitive_path in sensitive_paths:
-                if (sensitive_path[:-1] == '*' and path.startswith(sensitive_path[:-1])) or path == sensitive_path:
+                if (sensitive_path.endswith('*') and path.startswith(sensitive_path[:-1])) or path == sensitive_path:
                     await self.create_suspicious_activity_log(
-                        clickhouse_db=clickhouse_db,
                         user_id=user_id,
                         client_ip=client_ip,
                         user_agent=user_agent,
@@ -251,7 +277,6 @@ class CRUDUserActivity(
 
     async def create_suspicious_activity_log(
         self,
-        clickhouse_db: AsyncClient,
         *,
         user_id: Optional[str],
         client_ip: str,
@@ -261,16 +286,7 @@ class CRUDUserActivity(
         method: str,
         status_code: int
     ) -> None:
-        """
-        Log a suspicious activity event in ClickHouse
-        
-        Args:
-            clickhouse_db: ClickHouse database connection
-            user_id: The user ID associated with the activity
-            client_ip: The IP address that performed the action
-            user_agent: The user agent of the request
-            reason: The reason why this activity is suspicious
-        """
+        """Log a suspicious activity event in ClickHouse"""
         try:
             # Create the suspicious activity log entry
             now = datetime.utcnow()
@@ -291,27 +307,25 @@ class CRUDUserActivity(
             elif any(keyword in reason.lower() for keyword in low_severity_keywords):
                 severity = "low"
 
-            data = {
-                "timestamp": now,
-                "date": date,
-                "user_id": user_id,
-                "client_ip": client_ip,
-                "user_agent": user_agent,
-                "path": path,
-                "method": method,
-                "status_code": status_code,
-                "activity_type": "suspicious_behavior",
-                "severity": severity,
-                "details": reason,
-                "is_resolved": False,
-                "resolution_id": None,
-            }
-            # Insert directly into ClickHouse
-            await clickhouse_db.insert(
-                SuspiciousActivity.get_table_name(),
-                [list(data.values())],
-                column_names=list(data.keys())
+            # Create suspicious activity record
+            suspicious = SuspiciousActivity(
+                timestamp=now,
+                date=date,
+                user_id=user_id,
+                client_ip=client_ip,
+                user_agent=user_agent,
+                path=path,
+                method=method,
+                status_code=status_code,
+                activity_type="suspicious_behavior",
+                severity=severity,
+                details=reason,
+                is_resolved=False,
+                resolution_id=None,
             )
+
+            # Insert into ClickHouse
+            await self.suspicious.create(suspicious)
 
             # Add structured logging for monitoring
             logger.warning(
@@ -330,7 +344,6 @@ class CRUDUserActivity(
 
     async def get_user_activities(
         self,
-        db: AsyncClient,
         *,
         user_id: str,
         skip: int = 0,
@@ -338,9 +351,10 @@ class CRUDUserActivity(
     ) -> Tuple[List[UserActivity], int]:
         """Get recent activities for a user"""
         try:
-            # For count query, use proper parameter syntax with type
-            count = await db.query(
-                f"SELECT count() FROM {UserActivity.get_table_name()} WHERE user_id = {user_id:String}",
+            # Use self.activity instead of db
+            client = await self.activity.client
+            count = await client.query(
+                f"SELECT count() FROM {UserActivity.get_table_name()} WHERE user_id = {{user_id:String}}",
                 parameters={"user_id": user_id}
             )
 
@@ -348,9 +362,9 @@ class CRUDUserActivity(
             count_results = list(count.named_results())
             total = count_results[0]["count()"] if count_results else 0
 
-            # For main query, use proper parameter syntax with types
+            # Use self.activity for the main query
             table_name = UserActivity.get_table_name()
-            activities = await db.query(
+            activities = await client.query(
                 f"""
                 SELECT *
                 FROM {table_name}
@@ -365,28 +379,19 @@ class CRUDUserActivity(
                 },
             )
 
-            # activities.named_results() is also a generator, so use list() here too
             return [UserActivity(**activity) for activity in list(activities.named_results())], total
         except Exception as e:
             logger.error(f"Error getting user activities: {str(e)}")
             return [], 0
 
     async def get_user_activity_summary(
-        self, db: AsyncClient, *, user_id: str, days: int = 7
+        self, *, user_id: str, days: int = 7
     ) -> List[UserActivitySummary]:
-        """
-        Get summary of user activity over the specified period
-
-        Args:
-            db: ClickHouse connection
-            user_id: User ID
-            days: Number of days to analyze
-
-        Returns:
-            Dict with activity summary
-        """
+        """Get summary of user activity over the specified period"""
         try:
-            result = await db.query(
+            # Use self.activity instead of self.clickhouse
+            client = await self.activity.client
+            result = await client.query(
                 """
                 SELECT 
                     toDate(timestamp) AS day,
@@ -406,41 +411,35 @@ class CRUDUserActivity(
                 },
             )
 
-            # Rest of the method remains the same...
             rows = list(result.named_results())
-
             return [UserActivitySummary(**summary) for summary in rows]
         except Exception as e:
             logger.error(f"Error getting user activity summary: {str(e)}")
             return []
 
     async def get_security_profile(
-        self, 
-        db: AgnosticDatabase, 
-        *, 
+        self,
         user_id: str
     ) -> Optional[UserSecurityProfile]:
         """Get or create user security profile"""
-        profile = await db.user_security_profiles.find_one({"user_id": user_id})
+        # Use self.security_profiles instead of self.mongo
+        profile = await self.security_profiles.get_by_field("user_id", user_id)
 
         if not profile:
             # Create a new profile
-            profile = UserSecurityProfile(user_id=user_id).model_dump()
-            await db.user_security_profiles.insert_one(profile)
-            return UserSecurityProfile(**profile)
+            profile = UserSecurityProfile(user_id=user_id)
+            return await self.security_profiles.create(profile)
 
-        return UserSecurityProfile(**profile)
+        return profile
 
     async def add_trusted_device(
         self,
-        db: AgnosticDatabase,
-        *,
         user_id: str,
         device: TrustedDeviceCreate
     ) -> Dict[str, Any]:
         """Add a trusted device to user's security profile"""
         # First get profile
-        profile = await self.get_security_profile(db, user_id=user_id)
+        profile = await self.get_security_profile(user_id=user_id)
         if not profile:
             return {}
 
@@ -458,40 +457,46 @@ class CRUDUserActivity(
         fingerprint_dict["id"] = str(ObjectId())  # Generate a new ID
         fingerprint_dict["device_name"] = device.device_name
 
-        # Update profile
-        await db.user_security_profiles.update_one(
-            {"user_id": user_id},
-            {"$push": {"known_fingerprints": fingerprint_dict}}
+        # Use direct collection update instead of update() method
+        collection = await self.security_profiles.engine.get_collection(UserSecurityProfile.get_collection_name())
+        await collection.update_one(
+            {"user_id": profile.user_id},
+            {
+                "$push": {"known_fingerprints": fingerprint_dict},
+                "$set": {"last_trusted_device": fingerprint_dict}
+            },
+            upsert=False
         )
 
         return fingerprint_dict
 
     async def remove_trusted_device(
         self,
-        db: AgnosticDatabase,
-        *,
         user_id: str,
         device_id: str
     ) -> bool:
         """Remove a trusted device from user's security profile"""
-        result = await db.user_security_profiles.update_one(
+        # Use self.security_profiles instead of self.mongo
+        collection = await self.security_profiles.engine.get_collection(UserSecurityProfile.get_collection_name())
+        result = await collection.update_one(
             {"user_id": user_id},
             {"$pull": {"known_fingerprints": {"id": device_id}}}
         )
-
-        return result.modified_count > 0
+        if result.modified_count == 0:
+            return False
+        return True
 
     async def get_suspicious_activities(
         self,
-        clickhouse_db: AsyncClient,
-        *,
         user_id: str,
         skip: int = 0,
         limit: int = 20
     ) -> List[Dict[str, Any]]:
         """Get suspicious activities for a specific user from ClickHouse"""
         try:
-            result = await clickhouse_db.query(
+            # Use self.suspicious instead of self.clickhouse
+            client = await self.suspicious.client
+            result = await client.query(
                 """
                 SELECT
                     timestamp,
@@ -503,12 +508,13 @@ class CRUDUserActivity(
                     details,
                     is_resolved,
                     resolution_id
-                FROM suspicious_activity_logs
+                FROM {table}
                 WHERE user_id = {user_id}
                 ORDER BY timestamp DESC
                 LIMIT {limit} OFFSET {skip}
                 """,
                 parameters={
+                    "table": SuspiciousActivity.get_table_name(),
                     "user_id": user_id,
                     "limit": limit,
                     "skip": skip
@@ -531,14 +537,14 @@ class CRUDUserActivity(
 
     async def get_all_suspicious_activities(
         self,
-        clickhouse_db: AsyncClient,
-        *,
         skip: int = 0,
         limit: int = 20
     ) -> List[Dict[str, Any]]:
         """Get all suspicious activities (admin only) from ClickHouse"""
         try:
-            result = await clickhouse_db.query(
+            # Use self.suspicious instead of self.clickhouse
+            client = await self.suspicious.client
+            result = await client.query(
                 """
                 SELECT
                     timestamp,
@@ -550,11 +556,12 @@ class CRUDUserActivity(
                     details,
                     is_resolved,
                     resolution_id
-                FROM suspicious_activity_logs
+                FROM {table}
                 ORDER BY timestamp DESC
                 LIMIT {limit} OFFSET {skip}
                 """,
                 parameters={
+                    "table": SuspiciousActivity.get_table_name(),
                     "limit": limit,
                     "skip": skip
                 }
@@ -575,8 +582,6 @@ class CRUDUserActivity(
 
     async def record_suspicious_activity(
         self,
-        db: AgnosticDatabase,
-        *,
         user_id: str,
         client_ip: str,
         user_agent: str,
@@ -595,13 +600,15 @@ class CRUDUserActivity(
             activity_type=activity_type,
             severity=severity,
             details=details
-        ).model_dump()
-
-        result = await db.user_suspicious_activities.insert_one(activity)
-        activity["id"] = str(result.inserted_id)
-
-        # Update user's security profile
-        await db.user_security_profiles.update_one(
+        )
+        
+        # Use self.suspicious's insert method
+        await self.suspicious.create(activity)
+        activity_dict = activity.model_dump()
+        
+        # Update user's security profile using self.security_profiles
+        collection = await self.security_profiles.engine.get_collection(UserSecurityProfile.get_collection_name())
+        await collection.update_one(
             {"user_id": user_id},
             {
                 "$inc": {"suspicious_activity_count": 1},
@@ -610,12 +617,10 @@ class CRUDUserActivity(
             upsert=True
         )
 
-        return activity
+        return activity_dict
 
     async def block_ip(
         self,
-        db: AgnosticDatabase,
-        *,
         ip_address: str,
         reason: str = "Suspicious activity",
         created_by: Optional[str] = None,
@@ -628,53 +633,62 @@ class CRUDUserActivity(
             created_at=datetime.utcnow(),
             created_by=created_by,
             expires_at=expires_at
-        ).model_dump()
-
-        # Use upsert to avoid duplicates
-        await db.ip_blacklist.update_one(
-            {"ip": ip_address},
-            {"$set": ip_block},
-            upsert=True
         )
-
-        return ip_block
+        
+        # Use self.ip_blacklist create method with upsert logic
+        existing = await self.ip_blacklist.get_by_field("ip", ip_address)
+        if existing:
+            # Update if exists
+            for key, value in ip_block.model_dump().items():
+                setattr(existing, key, value)
+            await self.ip_blacklist.update(existing, existing)
+            return existing.model_dump()
+        else:
+            # Create new
+            created = await self.ip_blacklist.create(ip_block)
+            return created.model_dump()
 
     async def unblock_ip(
         self,
-        db: AgnosticDatabase,
-        *,
         ip_address: str
     ) -> bool:
         """Remove an IP from the blacklist"""
-        result = await db.ip_blacklist.delete_one({"ip": ip_address})
-        return result.deleted_count > 0
+        # Use self.ip_blacklist's get and remove methods
+        ip_block = await self.ip_blacklist.get_by_field("ip", ip_address)
+        if not ip_block:
+            return False
+            
+        await self.ip_blacklist.remove(ip_block.id)
+        return True
 
     async def check_ip_blacklisted(
-        self, db: AgnosticDatabase, *, ip_address: str
+        self, ip_address: str
     ) -> Tuple[bool, Optional[str]]:
         """Check if an IP is blacklisted"""
-        ip_block = await db.ip_blacklist.find_one({"ip": ip_address})
+        # Use self.ip_blacklist instead of db.ip_blacklist
+        ip_block = await self.ip_blacklist.get_by_field("ip", ip_address)
         if ip_block:
-            return True, ip_block.get("reason")
+            return True, ip_block.reason
 
         return False, None
 
     async def restrict_user(
         self,
-        db: AgnosticDatabase,
-        *,
         user_id: str,
         reason: str = "Suspicious activity detected"
     ) -> bool:
         """Restrict a user due to suspicious activity"""
-        result = await db.user_security_profiles.update_one(
-            {"user_id": user_id},
-            {"$set": {"is_restricted": True}}
-        )
+        # Get the user profile first
+        profile = await self.security_profiles.get_by_field("user_id", user_id)
+        if not profile:
+            return False
+            
+        # Update using CRUD methods
+        profile.is_restricted = True
+        await self.security_profiles.update(profile, {"is_restricted": True})
 
         # Also log this as a high severity event
         await self.record_suspicious_activity(
-            db=db,
             user_id=user_id,
             client_ip="system",
             user_agent="system",
@@ -683,18 +697,19 @@ class CRUDUserActivity(
             details=reason
         )
 
-        return result.modified_count > 0
+        return True
 
     async def get_suspicious_activity_analytics(
         self,
-        clickhouse_db: AsyncClient,
-        *,
         days: int = 30
     ) -> Dict[str, Any]:
         """Get analytics on suspicious activities from ClickHouse"""
         try:
+            # Use self.suspicious instead of self.clickhouse
+            client = await self.suspicious.client
+            
             # Get overall stats
-            summary_result = await clickhouse_db.query(
+            summary_result = await client.query(
                 """
                 SELECT 
                     count() AS total_activities,
@@ -703,61 +718,73 @@ class CRUDUserActivity(
                     countIf(severity = 'low') AS low_severity_count,
                     uniq(user_id) AS affected_users,
                     uniq(client_ip) AS unique_ips
-                FROM suspicious_activity_logs
+                FROM {table}
                 WHERE date >= today() - {days}
                 """,
-                parameters={"days": days}
+                parameters={
+                    "table": SuspiciousActivity.get_table_name(),
+                    "days": days
+                }
             )
 
             summary = summary_result.first_row_as_dict()
 
             # Get activity trend by day
-            trend_result = await clickhouse_db.query(
+            trend_result = await client.query(
                 """
                 SELECT 
                     date,
                     count() AS activities,
                     countIf(severity = 'high') AS high_severity
-                FROM suspicious_activity_logs  
+                FROM {table} 
                 WHERE date >= today() - {days}
                 GROUP BY date
                 ORDER BY date
                 """,
-                parameters={"days": days}
+                parameters={
+                    "table": SuspiciousActivity.get_table_name(),
+                    "days": days
+                }
             )
 
             trend = list(trend_result.named_results())
 
             # Most common activity types
-            types_result = await clickhouse_db.query(
+            types_result = await client.query(
                 """
                 SELECT 
                     activity_type,
                     count() AS count
-                FROM suspicious_activity_logs
+                FROM {table}
                 WHERE date >= today() - {days}
                 GROUP BY activity_type
                 ORDER BY count DESC
                 """,
-                parameters={"days": days}
+                parameters={
+                    "table": SuspiciousActivity.get_table_name(),
+                    "days": days
+                }
             )
 
             types = list(types_result.named_results())
 
             # Top users with suspicious activities
-            users_result = await clickhouse_db.query(
+            users_result = await client.query(
                 """
                 SELECT 
                     user_id,
                     count() AS activity_count,
                     max(timestamp) AS latest_activity
-                FROM suspicious_activity_logs
+                FROM {table}
                 WHERE date >= today() - {days}
                 GROUP BY user_id
                 ORDER BY activity_count DESC
                 LIMIT 10
                 """,
-                parameters={"days": days}
+                parameters={
+                    "table": SuspiciousActivity.get_table_name(),
+                    "days": days
+                }
             )
 
             users = list(users_result.named_results())
@@ -780,6 +807,5 @@ class CRUDUserActivity(
                 "error": str(e)
             }
 
-
 # Create a singleton instance
-user_activity = CRUDUserActivity(UserActivity)
+user_activity = CRUDUserActivity()

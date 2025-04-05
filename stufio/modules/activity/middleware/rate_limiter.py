@@ -10,9 +10,7 @@ from fastapi.responses import JSONResponse
 import re
 
 from stufio.api import deps
-from stufio.db.clickhouse import ClickhouseDatabase
 from stufio.core.config import get_settings
-from stufio.api.deps import get_db
 from ..crud import crud_rate_limit, crud_activity
 from ..services.rate_limit import rate_limit_service
 
@@ -60,19 +58,7 @@ class RateLimitingMiddleware(BaseHTTPMiddleware):
         try:
             normalized_path = self._get_route_pattern(raw_path)
             client_ip = self._get_client_ip(request)
-
-            db = None
-            db_generator = get_db()
-
-            # Check if get_db returns an async generator or regular generator
-            if inspect.isasyncgen(db_generator):
-                # It's an async generator - use anext
-                db = await anext(db_generator)
-            else:
-                # It's a regular generator - use next
-                db = next(db_generator)
-            clickhouse_db = await ClickhouseDatabase()
-
+            
             # Get current user if authenticated
             user_id = None
             auth_header = request.headers.get("authorization")
@@ -90,7 +76,7 @@ class RateLimitingMiddleware(BaseHTTPMiddleware):
 
             # Check if user is already rate limited in MongoDB
             if user_id:
-                is_limited, reason = await crud_rate_limit.is_user_rate_limited(db=db, user_id=user_id)
+                is_limited, reason = await crud_rate_limit.is_user_rate_limited(user_id)
                 if is_limited:
                     return JSONResponse(
                         status_code=429,
@@ -102,7 +88,6 @@ class RateLimitingMiddleware(BaseHTTPMiddleware):
                 key=f"ip:{client_ip}",
                 max_requests=settings.activity_RATE_LIMIT_IP_MAX_REQUESTS,
                 window_seconds=settings.activity_RATE_LIMIT_IP_WINDOW_SECONDS,
-                clickhouse_db=clickhouse_db,
                 record_type="ip",
                 record_data={"ip": client_ip},
             )
@@ -110,7 +95,6 @@ class RateLimitingMiddleware(BaseHTTPMiddleware):
             if not ip_allowed:
                 # Store persistent rate limit in MongoDB
                 asyncio.create_task(crud_rate_limit.set_user_rate_limited(
-                    db=db,
                     user_id=f"ip:{client_ip}",
                     reason="IP-based rate limit exceeded",
                     duration_minutes=15
@@ -125,7 +109,6 @@ class RateLimitingMiddleware(BaseHTTPMiddleware):
             is_blacklisted, reason = await rate_limit_service.is_ip_blacklisted(
                 ip=client_ip,  # Changed from 'ip' to 'ip_address'
                 db_fetch_func=crud_activity.check_ip_blacklisted,
-                db=db,
                 ip_address=client_ip,
             )
 
@@ -141,7 +124,6 @@ class RateLimitingMiddleware(BaseHTTPMiddleware):
                     key=f"user:{user_id}:{normalized_path}",  # Use normalized path
                     max_requests=settings.activity_RATE_LIMIT_USER_MAX_REQUESTS,
                     window_seconds=settings.activity_RATE_LIMIT_USER_WINDOW_SECONDS,
-                    clickhouse_db=clickhouse_db,
                     record_type="user",
                     record_data={"user_id": user_id, "path": normalized_path},
                 )
@@ -149,7 +131,6 @@ class RateLimitingMiddleware(BaseHTTPMiddleware):
                 if not user_allowed:
                     # Store persistent rate limit in MongoDB
                     asyncio.create_task(crud_rate_limit.set_user_rate_limited(
-                        db=db,
                         user_id=user_id,
                         reason=f"User rate limit exceeded for {normalized_path}",
                         duration_minutes=10
@@ -164,7 +145,6 @@ class RateLimitingMiddleware(BaseHTTPMiddleware):
             endpoint_config = await rate_limit_service.get_cached_config(
                 endpoint=normalized_path,
                 db_fetch_func=crud_rate_limit.get_rate_limit_config,
-                db=db,
             )
 
             if endpoint_config:
@@ -175,7 +155,6 @@ class RateLimitingMiddleware(BaseHTTPMiddleware):
                     key=f"endpoint:{normalized_path}:{client_ip}",
                     max_requests=max_requests,
                     window_seconds=window_seconds,
-                    clickhouse_db=clickhouse_db,
                     record_type="endpoint",
                     record_data={"ip": client_ip, "path": normalized_path}
                 )

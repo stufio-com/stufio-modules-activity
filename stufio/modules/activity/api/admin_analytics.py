@@ -13,22 +13,20 @@ router = APIRouter()
 async def get_path_statistics(
     path: str = Query(None, min_length=1, max_length=127),
     hours: int = Query(24, ge=1, le=168),
-    db: AsyncClient = Depends(deps.get_clickhouse),
     current_user=Depends(deps.get_current_active_superuser),
 ) -> List[PathStatistics]:
     """
     Get statistics for API paths
     """
-    return await crud_analytics.get_path_statistics(db=db, path=path, hours=hours)
+    return await crud_analytics.get_path_statistics(path=path, hours=hours)
 
 
 @router.get("/activities/error-report")
 async def get_error_report(
     days: int = Query(1, ge=1, le=30),
-    db: AsyncClient = Depends(deps.get_clickhouse),
     current_user=Depends(deps.get_current_active_superuser),
 ) -> List[ErrorReport]:
     """
     Get report of API errors
     """
-    return await crud_analytics.get_error_report(db=db, days=days)
+    return await crud_analytics.get_error_report(days=days)

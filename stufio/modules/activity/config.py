@@ -16,6 +16,8 @@ class ActivitySettings(ModuleSettings, BaseModel):
     RATE_LIMIT_CONFIG_TTL: int = 120
     RATE_LIMIT_DECISION_TTL: int = 30
     IP_BLACKLIST_TTL: int = 86400
+    
+    
 
 # Register these settings with the core
 settings.register_module_settings("activity", ActivitySettings)

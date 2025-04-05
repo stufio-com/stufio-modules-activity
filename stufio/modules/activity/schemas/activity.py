@@ -2,6 +2,8 @@ from pydantic import BaseModel, Field
 from datetime import datetime, date
 from typing import Optional
 
+from stufio.modules.events.schemas.base import BaseEventPayload
+
 
 class UserActivityResponse(BaseModel):
     """Response model for user activity"""
@@ -39,3 +41,13 @@ class UserActivitySummary(BaseModel):
     last_activity: Optional[datetime] = None
 
 
+class UserActivityEventPayload(BaseEventPayload):
+    """Payload for user activity events."""
+
+    path: str
+    method: str
+    client_ip: str
+    user_agent: str
+    status_code: int
+    process_time: float  # In seconds
+    is_authenticated: bool = False

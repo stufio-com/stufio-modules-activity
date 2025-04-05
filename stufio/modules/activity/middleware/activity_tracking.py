@@ -4,10 +4,12 @@ from starlette.types import ASGIApp
 import time
 import asyncio
 import logging
+import uuid
 
 from stufio.api import deps
-from stufio.db.clickhouse import ClickhouseDatabase
-from ..crud import crud_activity
+from stufio.modules.activity.events import UserActivityEvent
+from stufio.modules.activity.schemas.activity import UserActivityEventPayload
+from stufio.modules.events import ActorType
 from stufio.core.config import get_settings
 
 settings = get_settings()
@@ -18,7 +20,6 @@ class ActivityTrackingMiddleware(BaseHTTPMiddleware):
         super().__init__(app)
 
     async def dispatch(self, request: Request, call_next) -> Response:
-
         # Start timing the request
         start_time = time.time()
 
@@ -44,7 +45,9 @@ class ActivityTrackingMiddleware(BaseHTTPMiddleware):
         # Record activity asynchronously (don't block the response)
         if path.startswith(settings.API_V1_STR):
             user_id = None
+            is_authenticated = False
             auth_header = request.headers.get("authorization")
+
             if (
                 auth_header
                 and auth_header.startswith("Bearer ")
@@ -54,19 +57,21 @@ class ActivityTrackingMiddleware(BaseHTTPMiddleware):
                 try:
                     token_data = deps.get_token_payload(token)
                     user_id = token_data.sub
+                    is_authenticated = True
                 except:
                     pass
 
             # Use asyncio.create_task to run in background
             asyncio.create_task(
-                self._record_activity(
+                self._publish_activity_event(
                     user_id=str(user_id) if user_id else None,
                     path=path,
                     method=method,
                     client_ip=client_ip,
                     user_agent=user_agent,
                     status_code=status_code,
-                    process_time=process_time
+                    process_time=process_time,
+                    is_authenticated=is_authenticated
                 )
             )
 
@@ -80,7 +85,7 @@ class ActivityTrackingMiddleware(BaseHTTPMiddleware):
             return forwarded.split(",")[0].strip()
         return request.client.host if request.client else "unknown"
 
-    async def _record_activity(
+    async def _publish_activity_event(
         self,
         user_id,
         path,
@@ -89,61 +94,32 @@ class ActivityTrackingMiddleware(BaseHTTPMiddleware):
         user_agent,
         status_code,
         process_time,
+        is_authenticated
     ):
-        """Record the API activity in MongoDB and/or ClickHouse"""
+        """Publish a user activity event instead of directly writing to the database"""
         try:
-            clickhouse_db = await ClickhouseDatabase()
+            # Create a correlation ID for tracking
+            correlation_id = str(uuid.uuid4())
 
-            # Now use the db and current_user
-            await crud_activity.create_activity(
-                db=clickhouse_db,
-                user_id=user_id,
-                path=path,
-                method=method,
-                client_ip=client_ip,
-                user_agent=user_agent,
-                status_code=status_code,
-                process_time=process_time
+            # Publish the activity event
+            await UserActivityEvent.publish(
+                entity_id=user_id or f"anon-{client_ip}",
+                actor_type=ActorType.USER if user_id else ActorType.SYSTEM,
+                actor_id=user_id or "anonymous",
+                correlation_id=correlation_id,
+                payload=UserActivityEventPayload(
+                    path=path,
+                    method=method,
+                    client_ip=client_ip,
+                    user_agent=user_agent,
+                    status_code=status_code,
+                    process_time=process_time,
+                    is_authenticated=is_authenticated,
+                ),
+                metrics={"processing_time_ms": int(process_time * 1000)},
             )
 
-            # Check for suspicious activity
-            await self._check_suspicious_activity(
-                clickhouse_db=clickhouse_db,
-                user_id=user_id,
-                client_ip=client_ip,
-                user_agent=user_agent,
-                path=path,
-                method=method,
-                status_code=status_code,
-            )
+            logger.debug(f"Published activity event for path {path}")
+
         except Exception as e:
-            logger.error(f"Failed to record activity: {str(e)}")
-
-    async def _check_suspicious_activity(
-        self,
-        clickhouse_db,
-        user_id,
-        client_ip,
-        user_agent,
-        path,
-        method,
-        status_code
-    ):
-        """Check if this activity appears suspicious"""
-        try:
-            is_suspicious = await crud_activity.check_suspicious_activity(
-                clickhouse_db=clickhouse_db,
-                user_id=user_id,
-                client_ip=client_ip,
-                user_agent=user_agent,
-                path=path,
-                method=method,
-                status_code=status_code,
-            )
-
-            if is_suspicious:
-                logger.warning(
-                    f"Suspicious activity detected for user {user_id} from {client_ip}"
-                )
-        except Exception as e:
-            logger.error(f"Failed to check for suspicious activity: {str(e)}")
+            logger.error(f"Failed to publish activity event: {str(e)}", exc_info=True)

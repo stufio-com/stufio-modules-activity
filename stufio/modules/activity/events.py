@@ -1,4 +1,4 @@
-from stufio.modules.events.schemas.event_definition import EventDefinition
+from stufio.modules.events import EventDefinition
 from .schemas.activity import UserActivityEventPayload
 
 class UserActivityEvent(EventDefinition[UserActivityEventPayload]):

@@ -7,8 +7,8 @@ import logging
 import uuid
 
 from stufio.api import deps
-from stufio.modules.activity.events import UserActivityEvent
-from stufio.modules.activity.schemas.activity import UserActivityEventPayload
+from ..events import UserActivityEvent
+from ..schemas.activity import UserActivityEventPayload
 from stufio.modules.events import ActorType
 from stufio.core.config import get_settings
 

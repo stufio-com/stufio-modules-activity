@@ -1,33 +1,18 @@
-import stufio
-from stufio.modules.activity.events import UserActivityEvent
-from stufio.modules.activity.schemas.activity import UserActivityEventPayload
-from stufio.modules.events.consumers import get_kafka_router, get_kafka_broker
-from stufio.modules.events.consumers.asyncapi import stufio_event_subscriber
-from stufio.modules.events.schemas.messages import BaseEventMessage
-from stufio.core.config import get_settings
+from faststream.kafka.fastapi import Logger
+from ..events import UserActivityEvent
+from ..schemas.activity import UserActivityEventPayload
+from stufio.modules.events import stufio_event_subscriber, BaseEventMessage
 from ..crud import crud_activity
 
 
-settings = get_settings()
-kafka_broker = get_kafka_broker()
-
-# Get the router when needed
-kafka_router = get_kafka_router()
-
-
-# @kafka_router.subscriber(
-#     UserActivityEvent.get_topic_name(),
-#     # group_id=settings.events_KAFKA_GROUP_ID,
-# )
 @stufio_event_subscriber(UserActivityEvent)
 async def handle_user_activity(
-    event: BaseEventMessage[UserActivityEventPayload],
+    event: BaseEventMessage[UserActivityEventPayload], logger: Logger
 ) -> None:
     """
     Handle user activity events and record them in the database.
     This consumer replaces the direct database writes from the middleware.
     """
-    logger = kafka_broker.logger
     try:
         if not event.payload:
             logger.warning("Received user activity event with no payload")

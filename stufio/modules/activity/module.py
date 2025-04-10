@@ -4,7 +4,7 @@ import logging
 
 from stufio.core.module_registry import ModuleInterface
 from stufio.core.stufioapi import StufioAPI
-from stufio.modules.events.module import KafkaModuleMixin
+from stufio.modules.events import KafkaModuleMixin
 from .api import api_router
 from .models import UserActivity, ClientFingerprint, RateLimit, UserSecurityProfile
 from .middleware import ActivityTrackingMiddleware, RateLimitingMiddleware
@@ -13,7 +13,7 @@ from .__version__ import __version__
 logger = logging.getLogger(__name__)
 
 
-class ActivityModule(ModuleInterface, KafkaModuleMixin):
+class ActivityModule(KafkaModuleMixin, ModuleInterface):
     """Activity tracking and rate limiting module."""
 
     version = __version__
@@ -30,7 +30,3 @@ class ActivityModule(ModuleInterface, KafkaModuleMixin):
             List of (middleware_class, args, kwargs) tuples
         """
         return [(RateLimitingMiddleware, {}, {}), (ActivityTrackingMiddleware, {}, {})]
-
-    def get_models(self) -> List[Any]:
-        """Return this module's database models."""
-        return [UserActivity, ClientFingerprint, RateLimit, UserSecurityProfile]

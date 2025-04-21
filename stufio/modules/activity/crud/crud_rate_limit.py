@@ -425,12 +425,14 @@ class CRUDRateLimit:
     ) -> List[RateLimitConfigResponse]:
         """Get all rate limit configurations"""
         try:
-            # Get the collection name properly from the model's config
-            collection_name = RateLimitConfig.__collection__
-
             query = {"active": True} if active_only else {}
-            engine = self.config.engine
-            cursor = await engine.get_collection(collection_name).find(query).sort("endpoint", 1).skip(skip).limit(limit)
+            cursor = (
+                self.config.engine.get_collection(RateLimitConfig)
+                .find(query)
+                .sort("endpoint", 1)
+                .skip(skip)
+                .limit(limit)
+            )
             configs = await cursor.to_list(length=limit)
 
             # Convert ObjectId to string for each document
@@ -454,8 +456,6 @@ class CRUDRateLimit:
     ) -> RateLimitConfigResponse:
         """Create or update a rate limit configuration"""
         try:
-            collection_name = RateLimitConfig.__collection__
-
             now = datetime.utcnow()
             config_data = {
                 "endpoint": endpoint,
@@ -470,20 +470,23 @@ class CRUDRateLimit:
 
             # Check if config already exists
             engine = self.config.engine
-            existing = await engine.get_collection(collection_name).find_one(
+            existing = await engine.get_collection(RateLimitConfig).find_one(
                 {"endpoint": endpoint}
             )
 
             if existing:
                 # Update existing config
                 config_data["created_at"] = existing.get("created_at", now)
-                result = await engine.get_collection(collection_name).update_one(
-                    {"_id": existing["_id"]}, {"$set": {**config_data, "updated_at": now}}
+                result = await engine.get_collection(RateLimitConfig).update_one(
+                    {"_id": existing["_id"]},
+                    {"$set": {**config_data, "updated_at": now}},
                 )
                 config_data["id"] = str(existing["_id"])
             else:
                 # Create new config
-                result = await engine.get_collection(collection_name).insert_one(config_data)
+                result = await engine.get_collection(RateLimitConfig).insert_one(
+                    config_data
+                )
                 config_data["id"] = str(result.inserted_id)
 
             return RateLimitConfigResponse(**config_data)
@@ -514,8 +517,6 @@ class CRUDRateLimit:
     ) -> Optional[Dict[str, Any]]:
         """Update a rate limit configuration"""
         try:
-            collection_name = RateLimitConfig.__collection__
-
             object_id = ObjectId(config_id)
             update_data = {"updated_at": datetime.utcnow()}
 
@@ -535,7 +536,7 @@ class CRUDRateLimit:
                 update_data["description"] = description
 
             engine = self.config.engine
-            result = await engine.get_collection(collection_name).update_one(
+            result = await engine.get_collection(RateLimitConfig).update_one(
                 {"_id": object_id}, {"$set": update_data}
             )
 
@@ -543,7 +544,7 @@ class CRUDRateLimit:
                 return None
 
             # Get updated document
-            updated = await engine.get_collection(collection_name).find_one(
+            updated = await engine.get_collection(RateLimitConfig).find_one(
                 {"_id": object_id}
             )
             if updated:
@@ -562,11 +563,9 @@ class CRUDRateLimit:
         """Delete a rate limit configuration"""
         try:
             # Get the collection name properly from the model's config
-            collection_name = RateLimitConfig.__collection__
-
             object_id = ObjectId(config_id)
             engine = self.config.engine
-            result = await engine.get_collection(collection_name).delete_one(
+            result = await engine.get_collection(RateLimitConfig).delete_one(
                 {"_id": object_id}
             )
             return result.deleted_count > 0

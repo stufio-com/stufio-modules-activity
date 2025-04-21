@@ -4,14 +4,16 @@ import asyncio
 from time import time
 from typing import Optional, Dict, Any, Tuple
 import json
+from datetime import datetime
 
 from stufio.core.config import get_settings
 from stufio.db.redis import RedisClient
-from stufio.db.mongo import serialize_mongo_doc
+from stufio.db.mongo import MongoJSONEncoder, serialize_mongo_doc
 from ..crud.crud_rate_limit import crud_rate_limit
 
 settings = get_settings()
 logger = logging.getLogger(__name__)
+
 
 class RateLimitService:
     """Service for handling rate limiting with Redis + ClickHouse"""
@@ -123,35 +125,42 @@ class RateLimitService:
         try:
             # Fetch all configurations
             configs = await db_fetch_func(**fetch_params)
-            
+
             if not configs:
                 logger.warning("No rate limit configurations found to cache")
                 return
-                
+
             redis_client = await RedisClient()
-            
+
             # Cache each configuration
             for config in configs:
-                if not isinstance(config, dict):
-                    # Convert to dict if it's a model instance
-                    config_dict = serialize_mongo_doc(config)
-                else:
-                    config_dict = config
-                
-                endpoint = config_dict.get("endpoint")
-                if not endpoint:
+                try:
+                    if hasattr(config, "__dict__"):
+                        # Handle objects like RateLimitConfigResponse
+                        config_dict = config.__dict__
+                    elif not isinstance(config, dict):
+                        # Convert to dict if it's a model instance
+                        config_dict = serialize_mongo_doc(config)
+                    else:
+                        config_dict = config
+
+                    endpoint = config_dict.get("endpoint")
+                    if not endpoint:
+                        continue
+
+                    # Create Redis key
+                    redis_key = f"{settings.activity_RATE_LIMIT_REDIS_PREFIX}config:{endpoint}"
+
+                    # Serialize and cache using the custom encoder to handle datetime objects
+                    config_json = json.dumps(config_dict, cls=MongoJSONEncoder)
+                    await redis_client.set(redis_key, config_json)
+                    await redis_client.expire(redis_key, settings.activity_RATE_LIMIT_CONFIG_TTL)
+                except Exception as e:
+                    logger.error(f"Error caching config for endpoint: {e}")
                     continue
-                    
-                # Create Redis key
-                redis_key = f"{settings.activity_RATE_LIMIT_REDIS_PREFIX}config:{endpoint}"
-                
-                # Serialize and cache
-                config_json = json.dumps(config_dict)
-                await redis_client.set(redis_key, config_json)
-                await redis_client.expire(redis_key, settings.activity_RATE_LIMIT_CONFIG_TTL)
-                
+
             logger.info(f"Cached {len(configs)} rate limit configurations")
-            
+
         except Exception as e:
             logger.error(f"Error warming rate limit config cache: {str(e)}")
 
@@ -260,10 +269,15 @@ class RateLimitService:
         if config:
             try:
                 # Use the utility function to make the config serializable
-                serializable_config = serialize_mongo_doc(config)
-                
+                if hasattr(config, "__dict__"):
+                    # Handle objects like RateLimitConfigResponse
+                    serializable_config = config.__dict__
+                else:
+                    # Convert to dict if it's a model instance
+                    serializable_config = serialize_mongo_doc(config)
+
                 # Then serialize to JSON using the custom encoder
-                config_json = json.dumps(serializable_config)
+                config_json = json.dumps(serializable_config, cls=MongoJSONEncoder)
                 await redis_client.set(redis_key, config_json)
                 await redis_client.expire(redis_key, settings.activity_RATE_LIMIT_CONFIG_TTL)
             except Exception as e:

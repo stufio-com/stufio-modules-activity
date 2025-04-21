@@ -1,13 +1,12 @@
-import inspect
 import asyncio
-from ipaddress import ip_address
-from locale import normalize
-from fastapi import Request, Response, FastAPI
-from starlette.middleware.base import BaseHTTPMiddleware
+from fastapi import Request, Response
+from fastapi.responses import JSONResponse
 from starlette.types import ASGIApp
 import logging
-from fastapi.responses import JSONResponse
-import re
+from typing import Tuple, Optional, Dict, Any, List
+
+# Import the base middleware from events module
+from stufio.modules.events import BaseStufioMiddleware
 
 from stufio.api import deps
 from stufio.core.config import get_settings
@@ -19,163 +18,205 @@ settings = get_settings()
 logger = logging.getLogger(__name__)
 
 
-class RateLimitingMiddleware(BaseHTTPMiddleware):
-    def __init__(self, app: ASGIApp):
-        super().__init__(app)
-
-    def _get_route_pattern(self, path: str) -> str:
-        """
-        Extract the route pattern from a concrete URL path
-        
-        Examples:
-            /api/v1/domains/expired/by-date/2025-03-13/with-analysis
-            becomes
-            /api/v1/domains/expired/by-date/{expire_date}/with-analysis
-        """
-        normalized_path = path
-        normalized_path = re.sub(r"/\d{4}-\d{2}-\d{2}", "/{date}", normalized_path)
-        normalized_path = re.sub(r"/\d+", "/{int}", normalized_path)
-
-        return normalized_path
-
-    async def dispatch(
-        self,
-        request: Request,
-        call_next,
-    ) -> Response:
-        # Extract basic request info
-        raw_path = request.url.path
-
-        # Skip rate limiting for certain paths
-        if raw_path in [
-            "/metrics",
-            "/health",
+class RateLimitingMiddleware(BaseStufioMiddleware):
+    """
+    Middleware for rate limiting requests based on IP, user, and endpoints.
+    
+    This middleware checks multiple rate limits:
+    1. IP-based rate limiting
+    2. User-based rate limiting
+    3. Endpoint-specific rate limiting
+    4. IP blacklist checking
+    
+    Rate limit data is stored in Redis for fast checks and in MongoDB for persistent storage.
+    """
+    def __init__(
+        self, 
+        app: ASGIApp,
+        excluded_paths: Optional[List[str]] = None
+    ):
+        # Define additional paths to exclude from rate limiting
+        rate_limit_excluded = [
             settings.API_V1_STR + "/docs",
             settings.API_V1_STR + "/openapi.json",
-        ]:
-            return await call_next(request)
-
-        try:
-            normalized_path = self._get_route_pattern(raw_path)
-            client_ip = self._get_client_ip(request)
+        ]
+        
+        # Combine with default excluded paths from base middleware
+        if excluded_paths:
+            excluded_paths.extend(rate_limit_excluded)
+        else:
+            excluded_paths = rate_limit_excluded
             
-            # Get current user if authenticated
-            user_id = None
-            auth_header = request.headers.get("authorization")
-            if (
-                auth_header
-                and auth_header.startswith("Bearer ")
-                and raw_path not in [settings.API_V1_STR + "/login/claim"]
-            ):
-                token = auth_header.replace("Bearer ", "")
-                try:
-                    token_data = deps.get_token_payload(token)
-                    user_id = token_data.sub
-                except Exception as e:
-                    logger.debug(f"Error extracting user from token: {e}")
+        super().__init__(app, excluded_paths=excluded_paths)
+        
+        # Initialize and pre-warm the cache
+        asyncio.create_task(self._init_rate_limit_cache())
+    
+    async def _init_rate_limit_cache(self):
+        """Initialize and warm up the rate limit cache."""
+        try:
+            # Pre-fetch common endpoint configurations
+            await rate_limit_service.warm_config_cache(
+                db_fetch_func=crud_rate_limit.get_all_rate_limit_configs
+            )
+            logger.info("Rate limit configuration cache initialized")
+        except Exception as e:
+            logger.error(f"Error initializing rate limit cache: {e}")
 
-            # Check if user is already rate limited in MongoDB
-            if user_id:
-                is_limited, reason = await crud_rate_limit.is_user_rate_limited(user_id)
-                if is_limited:
-                    return JSONResponse(
-                        status_code=429,
-                        content={"detail": reason or "Rate limited"}
-                    )
+    async def _pre_process(self, request: Request) -> None:
+        """
+        Check rate limits before processing the request.
+        
+        This method is called by the base middleware's dispatch method
+        before the request is processed by the next middleware or route handler.
+        """
+        # Extract basic request info
+        path = request.url.path
+        normalized_path = self._normalize_path(path)
+        client_ip = self._get_client_ip(request)
+        
+        # Get current user if authenticated
+        user_id = None
+        auth_header = request.headers.get("authorization")
+        if (
+            auth_header
+            and auth_header.startswith("Bearer ")
+            and path not in [settings.API_V1_STR + "/login/claim"]
+        ):
+            token = auth_header.replace("Bearer ", "")
+            try:
+                token_data = deps.get_token_payload(token)
+                user_id = token_data.sub
+            except Exception as e:
+                logger.debug(f"Error extracting user from token: {e}")
 
-            # IP-based rate limiting
-            ip_allowed = await rate_limit_service.check_limit(
-                key=f"ip:{client_ip}",
-                max_requests=settings.activity_RATE_LIMIT_IP_MAX_REQUESTS,
-                window_seconds=settings.activity_RATE_LIMIT_IP_WINDOW_SECONDS,
-                record_type="ip",
-                record_data={"ip": client_ip},
+        # Check if user is already rate limited in MongoDB
+        if user_id:
+            is_limited, reason = await crud_rate_limit.is_user_rate_limited(user_id)
+            if is_limited:
+                raise RateLimitException(
+                    detail=reason or "Rate limited",
+                    rate_limit_type="user_persistent"
+                )
+
+        # IP blacklist check
+        is_blacklisted, reason = await rate_limit_service.is_ip_blacklisted(
+            ip=client_ip,
+            db_fetch_func=crud_activity.check_ip_blacklisted,
+            ip_address=client_ip  # Add the missing ip_address parameter here
+        )
+
+        if is_blacklisted:
+            raise RateLimitException(
+                detail=reason or "Access denied",
+                rate_limit_type="ip_blacklist"
             )
 
-            if not ip_allowed:
+        # IP-based rate limiting with Redis
+        ip_allowed = await rate_limit_service.check_limit(
+            key=f"ip:{client_ip}",
+            max_requests=settings.activity_RATE_LIMIT_IP_MAX_REQUESTS,
+            window_seconds=settings.activity_RATE_LIMIT_IP_WINDOW_SECONDS,
+            record_type="ip",
+            record_data={"ip": client_ip},
+        )
+
+        if not ip_allowed:
+            # Store persistent rate limit in MongoDB
+            asyncio.create_task(crud_rate_limit.set_user_rate_limited(
+                user_id=f"ip:{client_ip}",
+                reason="IP-based rate limit exceeded",
+                duration_minutes=15
+            ))
+
+            raise RateLimitException(
+                detail="Too many requests from this IP address",
+                rate_limit_type="ip"
+            )
+
+        # User-based rate limiting with Redis
+        if user_id:
+            user_allowed = await rate_limit_service.check_limit(
+                key=f"user:{user_id}:{normalized_path}",
+                max_requests=settings.activity_RATE_LIMIT_USER_MAX_REQUESTS,
+                window_seconds=settings.activity_RATE_LIMIT_USER_WINDOW_SECONDS,
+                record_type="user",
+                record_data={"user_id": user_id, "path": normalized_path},
+            )
+
+            if not user_allowed:
                 # Store persistent rate limit in MongoDB
                 asyncio.create_task(crud_rate_limit.set_user_rate_limited(
-                    user_id=f"ip:{client_ip}",
-                    reason="IP-based rate limit exceeded",
-                    duration_minutes=15
+                    user_id=user_id,
+                    reason=f"User rate limit exceeded for {normalized_path}",
+                    duration_minutes=10
                 ))
 
-                return JSONResponse(
-                    status_code=429, 
-                    content={"detail": "Too many requests from this IP address"}
+                raise RateLimitException(
+                    detail="Too many requests - please slow down",
+                    rate_limit_type="user"
                 )
 
-            # IP blacklist check
-            is_blacklisted, reason = await rate_limit_service.is_ip_blacklisted(
-                ip=client_ip,  # Changed from 'ip' to 'ip_address'
-                db_fetch_func=crud_activity.check_ip_blacklisted,
-                ip_address=client_ip,
+        # Endpoint-specific rate limiting with Redis
+        endpoint_config = await rate_limit_service.get_cached_config(
+            endpoint=normalized_path,
+            db_fetch_func=crud_rate_limit.get_rate_limit_config,
+        )
+
+        if endpoint_config:
+            max_requests = endpoint_config.get("max_requests", 100)
+            window_seconds = endpoint_config.get("window_seconds", 60)
+
+            endpoint_allowed = await rate_limit_service.check_limit(
+                key=f"endpoint:{normalized_path}:{client_ip}",
+                max_requests=max_requests,
+                window_seconds=window_seconds,
+                record_type="endpoint",
+                record_data={"ip": client_ip, "path": normalized_path}
             )
 
-            if is_blacklisted:
-                return JSONResponse(
-                    status_code=403,
-                    content={"detail": reason or "Access denied"}
+            if not endpoint_allowed:
+                raise RateLimitException(
+                    detail=f"Rate limit exceeded for {normalized_path}",
+                    rate_limit_type="endpoint"
                 )
 
-            # User-based rate limiting
-            if user_id:
-                user_allowed = await rate_limit_service.check_limit(
-                    key=f"user:{user_id}:{normalized_path}",  # Use normalized path
-                    max_requests=settings.activity_RATE_LIMIT_USER_MAX_REQUESTS,
-                    window_seconds=settings.activity_RATE_LIMIT_USER_WINDOW_SECONDS,
-                    record_type="user",
-                    record_data={"user_id": user_id, "path": normalized_path},
-                )
-
-                if not user_allowed:
-                    # Store persistent rate limit in MongoDB
-                    asyncio.create_task(crud_rate_limit.set_user_rate_limited(
-                        user_id=user_id,
-                        reason=f"User rate limit exceeded for {normalized_path}",
-                        duration_minutes=10
-                    ))
-
-                    return JSONResponse(
-                        status_code=429,
-                        content={"detail": "Too many requests - please slow down"}
-                    )
-
-            # Endpoint-specific rate limiting
-            endpoint_config = await rate_limit_service.get_cached_config(
-                endpoint=normalized_path,
-                db_fetch_func=crud_rate_limit.get_rate_limit_config,
+    async def _handle_exception(self, request: Request, exception: Exception) -> Response:
+        """
+        Handle exceptions raised during request processing.
+        
+        This middleware specifically handles RateLimitException and generates
+        appropriate responses. Other exceptions are delegated to the base middleware.
+        """
+        if isinstance(exception, RateLimitException):
+            # Return a 429 Too Many Requests response for rate limit exceptions
+            rate_limit_type = getattr(exception, "rate_limit_type", "unknown")
+            
+            # Add rate limit headers
+            headers = {
+                "X-Rate-Limit-Type": rate_limit_type,
+                "Retry-After": "60",  # Default retry after 60 seconds
+            }
+            
+            # For different rate limit types, set different retry periods
+            if rate_limit_type == "ip_blacklist":
+                headers["Retry-After"] = str(24 * 60 * 60)  # 24 hours
+            elif rate_limit_type == "user_persistent":
+                headers["Retry-After"] = str(10 * 60)  # 10 minutes
+            
+            return JSONResponse(
+                status_code=429,
+                content={"detail": str(exception)},
+                headers=headers
             )
+        
+        # For other exceptions, delegate to the base middleware
+        return await super()._handle_exception(request, exception)
 
-            if endpoint_config:
-                max_requests = endpoint_config.get("max_requests", 100)
-                window_seconds = endpoint_config.get("window_seconds", 60)
 
-                endpoint_allowed = await rate_limit_service.check_limit(
-                    key=f"endpoint:{normalized_path}:{client_ip}",
-                    max_requests=max_requests,
-                    window_seconds=window_seconds,
-                    record_type="endpoint",
-                    record_data={"ip": client_ip, "path": normalized_path}
-                )
-
-                if not endpoint_allowed:
-                    return JSONResponse(
-                        status_code=429,
-                        content={"detail": f"Rate limit exceeded for {normalized_path}"}
-                    )
-
-        except Exception as e:
-            # Log the error but allow the request to continue to avoid blocking legitimate requests
-            logger.error(f"Error in rate limiting checks: {str(e)}")
-
-        # Process the request if rate limits are not exceeded or there was an error
-        return await call_next(request)
-
-    def _get_client_ip(self, request: Request) -> str:
-        """Extract the real client IP from request headers"""
-        forwarded = request.headers.get("x-forwarded-for")
-        if forwarded:
-            # Get the first IP if multiple are provided
-            return forwarded.split(",")[0].strip()
-        return request.client.host if request.client else "unknown"
+class RateLimitException(Exception):
+    """Custom exception for rate limiting."""
+    def __init__(self, detail: str, rate_limit_type: str = "unknown"):
+        self.detail = detail
+        self.rate_limit_type = rate_limit_type
+        super().__init__(detail)

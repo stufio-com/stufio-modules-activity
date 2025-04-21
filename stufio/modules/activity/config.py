@@ -3,7 +3,8 @@
     It defines the settings related to rate limiting, security, and Redis configurations.
     These settings are registered with the core settings registry and can be accessed
     throughout the application."""
-from stufio.core.config import ModuleSettings, get_settings
+from stufio.core.config import get_settings
+from stufio.core.settings import ModuleSettings
 
 settings = get_settings()
 
@@ -20,7 +21,7 @@ class ActivitySettings(ModuleSettings):
     RATE_LIMIT_CONFIG_TTL: int = 120 # 2 minutes
     RATE_LIMIT_DECISION_TTL: int = 30 # 30 seconds
     IP_BLACKLIST_TTL: int = 86400  # 1 day
-    
+
 
 # Register these settings with the core
 settings.register_module_settings("activity", ActivitySettings)

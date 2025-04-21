@@ -109,6 +109,53 @@ class RateLimitService:
         return is_allowed
 
     @staticmethod
+    async def warm_config_cache(
+        db_fetch_func,
+        **fetch_params
+    ) -> None:
+        """
+        Initialize and warm up the rate limit configuration cache
+        
+        Args:
+            db_fetch_func: Function to call to fetch configurations
+            fetch_params: Additional parameters to pass to db_fetch_func
+        """
+        try:
+            # Fetch all configurations
+            configs = await db_fetch_func(**fetch_params)
+            
+            if not configs:
+                logger.warning("No rate limit configurations found to cache")
+                return
+                
+            redis_client = await RedisClient()
+            
+            # Cache each configuration
+            for config in configs:
+                if not isinstance(config, dict):
+                    # Convert to dict if it's a model instance
+                    config_dict = serialize_mongo_doc(config)
+                else:
+                    config_dict = config
+                
+                endpoint = config_dict.get("endpoint")
+                if not endpoint:
+                    continue
+                    
+                # Create Redis key
+                redis_key = f"{settings.activity_RATE_LIMIT_REDIS_PREFIX}config:{endpoint}"
+                
+                # Serialize and cache
+                config_json = json.dumps(config_dict)
+                await redis_client.set(redis_key, config_json)
+                await redis_client.expire(redis_key, settings.activity_RATE_LIMIT_CONFIG_TTL)
+                
+            logger.info(f"Cached {len(configs)} rate limit configurations")
+            
+        except Exception as e:
+            logger.error(f"Error warming rate limit config cache: {str(e)}")
+
+    @staticmethod
     async def _record_analytics(
         record_type,
         record_data,

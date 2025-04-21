@@ -425,8 +425,8 @@ class CRUDRateLimit:
     ) -> List[RateLimitConfigResponse]:
         """Get all rate limit configurations"""
         try:
-            # Get the collection name properly
-            collection_name = RateLimitConfig.model_config.get("collection", "rate_limit_configs")
+            # Get the collection name properly from the model's config
+            collection_name = RateLimitConfig.__collection__
 
             query = {"active": True} if active_only else {}
             engine = self.config.engine
@@ -454,8 +454,7 @@ class CRUDRateLimit:
     ) -> RateLimitConfigResponse:
         """Create or update a rate limit configuration"""
         try:
-            # Get the collection name properly
-            collection_name = RateLimitConfig.model_config.get("collection", "rate_limit_configs")
+            collection_name = RateLimitConfig.__collection__
 
             now = datetime.utcnow()
             config_data = {
@@ -515,8 +514,7 @@ class CRUDRateLimit:
     ) -> Optional[Dict[str, Any]]:
         """Update a rate limit configuration"""
         try:
-            # Get the collection name properly
-            collection_name = RateLimitConfig.model_config.get("collection", "rate_limit_configs")
+            collection_name = RateLimitConfig.__collection__
 
             object_id = ObjectId(config_id)
             update_data = {"updated_at": datetime.utcnow()}
@@ -563,8 +561,8 @@ class CRUDRateLimit:
     ) -> bool:
         """Delete a rate limit configuration"""
         try:
-            # Get the collection name properly
-            collection_name = RateLimitConfig.model_config.get("collection", "rate_limit_configs")
+            # Get the collection name properly from the model's config
+            collection_name = RateLimitConfig.__collection__
 
             object_id = ObjectId(config_id)
             engine = self.config.engine
@@ -817,10 +815,10 @@ class CRUDRateLimit:
         """Set a user as rate limited in MongoDB"""
         try:
             limited_until = datetime.utcnow() + timedelta(minutes=duration_minutes)
-            
+
             # Try to get existing record
             record = await self.user_limits.get_by_fields(user_id=user_id)
-            
+
             if record:
                 # Update existing record
                 record.is_limited = True
@@ -839,7 +837,7 @@ class CRUDRateLimit:
                 )
                 await self.user_limits.create(new_record)
                 return True
-                
+
         except Exception as e:
             logger.error(f"Error setting user rate limit: {str(e)}")
             return False
@@ -852,7 +850,7 @@ class CRUDRateLimit:
         try:
             # Get existing record
             record = await self.user_limits.get_by_fields(user_id=user_id)
-            
+
             if record:
                 record.is_limited = False
                 record.reason = None
@@ -860,7 +858,7 @@ class CRUDRateLimit:
                 record.updated_at = datetime.utcnow()
                 await self.user_limits.update(record)
                 return True
-            
+
             return False
         except Exception as e:
             logger.error(f"Error removing user rate limit: {str(e)}")
@@ -874,7 +872,7 @@ class CRUDRateLimit:
         try:
             # Use the proper model through our CRUD helper
             record = await self.user_limits.get_by_fields(user_id=user_id)
-            
+
             if record and record.is_limited:
                 # Check if limitation has expired
                 if record.limited_until and record.limited_until > datetime.utcnow():
@@ -883,7 +881,7 @@ class CRUDRateLimit:
                     # Limitation has expired, update the record
                     record.is_limited = False
                     await self.user_limits.update(record)
-                    
+
             return False, None
         except Exception as e:
             logger.error(f"Error checking user rate limit status: {str(e)}")

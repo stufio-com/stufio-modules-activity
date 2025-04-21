@@ -41,13 +41,3 @@ class UserActivitySummary(BaseModel):
     last_activity: Optional[datetime] = None
 
 
-class UserActivityEventPayload(BaseEventPayload):
-    """Payload for user activity events."""
-
-    path: str
-    method: str
-    client_ip: str
-    user_agent: str
-    status_code: int
-    process_time: float  # In seconds
-    is_authenticated: bool = False

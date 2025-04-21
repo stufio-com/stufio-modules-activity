@@ -6,8 +6,7 @@ from stufio.core.module_registry import ModuleInterface
 from stufio.core.stufioapi import StufioAPI
 from stufio.modules.events import KafkaModuleMixin
 from .api import api_router
-from .models import UserActivity, ClientFingerprint, RateLimit, UserSecurityProfile
-from .middleware import ActivityTrackingMiddleware, RateLimitingMiddleware
+from .middleware import RateLimitingMiddleware
 from .__version__ import __version__
 
 logger = logging.getLogger(__name__)
@@ -29,4 +28,4 @@ class ActivityModule(KafkaModuleMixin, ModuleInterface):
         Returns:
             List of (middleware_class, args, kwargs) tuples
         """
-        return [(RateLimitingMiddleware, {}, {}), (ActivityTrackingMiddleware, {}, {})]
+        return [(RateLimitingMiddleware, {}, {})]

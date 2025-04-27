@@ -47,7 +47,7 @@ class CRUDUserActivity:
             # Generate a unique ID for this activity
             event_id = str(uuid.uuid4())
             current_time = datetime_now_sec()
-            
+
             # Create the activity record with explicit timestamp and ID
             api_request = UserActivity(
                 event_id=event_id,  # Set explicit ID
@@ -65,21 +65,21 @@ class CRUDUserActivity:
 
             # Use the dict_for_insert method to ensure proper data formatting
             insert_data = api_request.dict_for_insert()
-            
+
             # Get the ClickHouse client directly for more control
             client = await self.activity.client
-            
+
             # Extract column names and values for explicit insertion
             columns = list(insert_data.keys())
             values = [list(insert_data.values())]
-            
+
             # Insert using explicit column names
             await client.insert(
                 UserActivity.get_table_name(),
                 values,
                 column_names=columns  # Explicitly specify column names
             )
-            
+
             # Update user security profile if this is an authenticated user
             if is_authenticated:
                 await self._update_user_security_profile(effective_user_id, client_ip, user_agent)
@@ -87,33 +87,33 @@ class CRUDUserActivity:
             return True
         except Exception as e:
             logger.error(f"Error recording API request in ClickHouse: {str(e)}", exc_info=True)
-            
+
             # Add diagnostics to help debug the issue
             try:
                 if 'insert_data' in locals():
                     logger.debug(f"Insert data: {insert_data}")
-                    
+
                 # Get actual table structure
                 schema_result = await client.query(f"DESCRIBE TABLE {UserActivity.get_table_name()}")
                 schema_columns = [row[0] for row in schema_result.result_rows]
                 logger.debug(f"ClickHouse table columns: {schema_columns}")
-                
+
                 if 'insert_data' in locals():
                     logger.debug(f"Data columns: {list(insert_data.keys())}")
-                    
+
                     # Show differences
                     table_set = set(schema_columns)
                     data_set = set(insert_data.keys())
                     missing_in_data = table_set - data_set
                     extra_in_data = data_set - table_set
-                    
+
                     if missing_in_data:
                         logger.error(f"Columns in table but missing in data: {missing_in_data}")
                     if extra_in_data:
                         logger.error(f"Columns in data but missing in table: {extra_in_data}")
             except Exception as debug_e:
                 logger.error(f"Error during diagnostics: {debug_e}")
-                
+
             return False
 
     async def _update_user_security_profile(
@@ -340,7 +340,7 @@ class CRUDUserActivity:
             )
 
         except Exception as e:
-            logger.error(f"Failed to log suspicious activity: {str(e)}")
+            logger.error(f"❌ Failed to log suspicious activity: {str(e)}")
 
     async def get_user_activities(
         self,
@@ -601,11 +601,11 @@ class CRUDUserActivity:
             severity=severity,
             details=details
         )
-        
+
         # Use self.suspicious's insert method
         await self.suspicious.create(activity)
         activity_dict = activity.model_dump()
-        
+
         # Update user's security profile using self.security_profiles
         collection = await self.security_profiles.engine.get_collection(UserSecurityProfile.get_collection_name())
         await collection.update_one(
@@ -634,7 +634,7 @@ class CRUDUserActivity:
             created_by=created_by,
             expires_at=expires_at
         )
-        
+
         # Use self.ip_blacklist create method with upsert logic
         existing = await self.ip_blacklist.get_by_field("ip", ip_address)
         if existing:
@@ -657,7 +657,7 @@ class CRUDUserActivity:
         ip_block = await self.ip_blacklist.get_by_field("ip", ip_address)
         if not ip_block:
             return False
-            
+
         await self.ip_blacklist.remove(ip_block.id)
         return True
 
@@ -682,7 +682,7 @@ class CRUDUserActivity:
         profile = await self.security_profiles.get_by_field("user_id", user_id)
         if not profile:
             return False
-            
+
         # Update using CRUD methods
         profile.is_restricted = True
         await self.security_profiles.update(profile, {"is_restricted": True})
@@ -707,7 +707,7 @@ class CRUDUserActivity:
         try:
             # Use self.suspicious instead of self.clickhouse
             client = await self.suspicious.client
-            
+
             # Get overall stats
             summary_result = await client.query(
                 """

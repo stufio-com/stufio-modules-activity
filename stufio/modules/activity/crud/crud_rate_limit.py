@@ -125,7 +125,7 @@ class CRUDRateLimit:
             )
         except Exception as e:
             # Just log the error, don't let this affect the main flow
-            logger.error(f"Failed to record rate limit violation: {str(e)}")
+            logger.error(f"❌ Failed to record rate limit violation: {str(e)}")
 
     async def _get_user_override(
         self,

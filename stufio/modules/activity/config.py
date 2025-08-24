@@ -21,6 +21,7 @@ class ActivitySettings(ModuleSettings):
     RATE_LIMIT_CONFIG_TTL: int = 120 # 2 minutes
     RATE_LIMIT_DECISION_TTL: int = 30 # 30 seconds
     IP_BLACKLIST_TTL: int = 86400  # 1 day
+    RATE_LIMIT_ENDPOINTS: list = []
 
 
 # Register these settings with the core

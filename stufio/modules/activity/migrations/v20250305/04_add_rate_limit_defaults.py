@@ -51,7 +51,7 @@ class SeedRateLimitConfigs(MongoMigrationScript):
 
         # Add configs from settings
         endpoint_configs = []
-        for endpoint, config in settings.RATE_LIMIT_ENDPOINTS.items():
+        for endpoint, config in settings.activity_RATE_LIMIT_ENDPOINTS.items():
             endpoint_configs.append({
                 "endpoint": endpoint,
                 "max_requests": config.get("max_requests", 100),

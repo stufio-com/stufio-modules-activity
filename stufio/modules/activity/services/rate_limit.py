@@ -1,10 +1,8 @@
-from ipaddress import ip_address
 import logging
 import asyncio
 from time import time
 from typing import Optional, Dict, Any, Tuple
 import json
-from datetime import datetime
 
 from stufio.core.config import get_settings
 from stufio.db.redis import RedisClient
@@ -108,7 +106,7 @@ class RateLimitService:
         except Exception as e:
             logger.error(f"Error caching rate limit decision in Redis: {str(e)}")
 
-        return is_allowed
+        return is_allowed if is_allowed is not None else True
 
     @staticmethod
     async def warm_config_cache(
@@ -329,7 +327,7 @@ class RateLimitService:
     async def blacklist_ip(
         ip: str,
         reason: str = "IP blacklisted",
-        duration_seconds: int = None,
+        duration_seconds: Optional[int] = None,
         redis_client=None,
     ) -> bool:
         """

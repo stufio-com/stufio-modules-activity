@@ -51,17 +51,34 @@ class SeedRateLimitConfigs(MongoMigrationScript):
 
         # Add configs from settings
         endpoint_configs = []
-        for endpoint, config in settings.activity_RATE_LIMIT_ENDPOINTS.items():
-            endpoint_configs.append({
-                "endpoint": endpoint,
-                "max_requests": config.get("max_requests", 100),
-                "window_seconds": config.get("window_seconds", 60),
-                "active": True,
-                "bypass_roles": ["admin", "system"],
-                "description": f"Rate limit for {endpoint}",
-                "created_at": now,
-                "updated_at": now
-            })
+        
+        # Check if activity_RATE_LIMIT_ENDPOINTS exists and is a dict
+        rate_limit_endpoints = getattr(settings, 'activity_RATE_LIMIT_ENDPOINTS', {})
+        if isinstance(rate_limit_endpoints, dict):
+            for endpoint, config in rate_limit_endpoints.items():
+                endpoint_configs.append({
+                    "endpoint": endpoint,
+                    "max_requests": config.get("max_requests", 100) if isinstance(config, dict) else 100,
+                    "window_seconds": config.get("window_seconds", 60) if isinstance(config, dict) else 60,
+                    "active": True,
+                    "bypass_roles": ["admin", "system"],
+                    "description": f"Rate limit for {endpoint}",
+                    "created_at": now,
+                    "updated_at": now
+                })
+        elif isinstance(rate_limit_endpoints, list):
+            # Handle case where it's a list of endpoints
+            for endpoint in rate_limit_endpoints:
+                endpoint_configs.append({
+                    "endpoint": endpoint,
+                    "max_requests": 100,
+                    "window_seconds": 60,
+                    "active": True,
+                    "bypass_roles": ["admin", "system"],
+                    "description": f"Rate limit for {endpoint}",
+                    "created_at": now,
+                    "updated_at": now
+                })
 
         # Additional pre-defined rate limits for common endpoints
         additional_configs = [

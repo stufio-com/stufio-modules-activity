@@ -1,5 +1,5 @@
 import logging
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from typing import Dict, Any, Optional, List, Tuple
 from bson import ObjectId
 from stufio.crud.clickhouse_base import CRUDClickhouse
@@ -37,7 +37,7 @@ class CRUDRateLimit:
             # Check for override
             override = await self._get_user_override(user_id=user_id, path=path)
             if override:
-                now = datetime.utcnow()
+                now = datetime.now(timezone.utc)
                 if override.get("expires_at") and override.get("expires_at") < now:
                     # Override expired, delete it
                     await self.mongo.remove(override["id"])
@@ -47,7 +47,7 @@ class CRUDRateLimit:
                     window_seconds = override.get("window_seconds", window_seconds)
 
             key = f"user:{user_id}:{path}"
-            now = datetime.utcnow()
+            now = datetime.now(timezone.utc)
             window_start = now - timedelta(seconds=window_seconds)
 
             # Get client first
@@ -85,7 +85,7 @@ class CRUDRateLimit:
             return RateLimitStatus(
                 total_allowed=max_requests,
                 remaining=max_requests,
-                reset_at=datetime.utcnow() + timedelta(seconds=window_seconds),
+                reset_at=datetime.now(timezone.utc) + timedelta(seconds=window_seconds),
                 window_seconds=window_seconds
             )
 
@@ -101,7 +101,7 @@ class CRUDRateLimit:
     ) -> None:
         """Record a rate limit violation in ClickHouse for analysis"""
         try:
-            now = datetime.utcnow()
+            now = datetime.now(timezone.utc)
             # Get client first
             client = await self.clickhouse.client
 
@@ -159,7 +159,7 @@ class CRUDRateLimit:
         # Check if override already exists
         existing = await self.mongo.get_by_fields(user_id=user_id, path=path)
 
-        now = datetime.utcnow()
+        now = datetime.now(timezone.utc)
         override_data = {
             "user_id": user_id,
             "path": path,
@@ -456,7 +456,7 @@ class CRUDRateLimit:
     ) -> RateLimitConfigResponse:
         """Create or update a rate limit configuration"""
         try:
-            now = datetime.utcnow()
+            now = datetime.now(timezone.utc)
             config_data = {
                 "endpoint": endpoint,
                 "max_requests": max_requests,
@@ -501,8 +501,8 @@ class CRUDRateLimit:
                 active=active,
                 bypass_roles=bypass_roles or [],
                 description=description,
-                created_at=datetime.utcnow(),
-                updated_at=datetime.utcnow()
+                created_at=datetime.now(timezone.utc),
+                updated_at=datetime.now(timezone.utc)
             )
 
     async def update_rate_limit_config(
@@ -518,7 +518,7 @@ class CRUDRateLimit:
         """Update a rate limit configuration"""
         try:
             object_id = ObjectId(config_id)
-            update_data = {"updated_at": datetime.utcnow()}
+            update_data = {"updated_at": datetime.now(timezone.utc)}
 
             if max_requests is not None:
                 update_data["max_requests"] = max_requests
@@ -585,7 +585,7 @@ class CRUDRateLimit:
             client = await self.clickhouse.client
 
             # First, check for recent violations (super fast)
-            recent_time = datetime.utcnow() - timedelta(seconds=window_seconds)
+            recent_time = datetime.now(timezone.utc) - timedelta(seconds=window_seconds)
             result = await client.query(
                 """
                 SELECT 1
@@ -660,7 +660,7 @@ class CRUDRateLimit:
             client = await self.clickhouse.client
 
             # First, check for recent violations (super fast)
-            recent_time = datetime.utcnow() - timedelta(seconds=window_seconds)
+            recent_time = datetime.now(timezone.utc) - timedelta(seconds=window_seconds)
             result = await client.query(
                 """
                 SELECT 1
@@ -739,7 +739,7 @@ class CRUDRateLimit:
             client = await self.clickhouse.client
 
             # First, check for recent violations (super fast)
-            recent_time = datetime.utcnow() - timedelta(seconds=window_seconds)
+            recent_time = datetime.now(timezone.utc) - timedelta(seconds=window_seconds)
             result = await client.query(
                 """
                 SELECT 1
@@ -813,7 +813,7 @@ class CRUDRateLimit:
     ) -> bool:
         """Set a user as rate limited in MongoDB"""
         try:
-            limited_until = datetime.utcnow() + timedelta(minutes=duration_minutes)
+            limited_until = datetime.now(timezone.utc) + timedelta(minutes=duration_minutes)
 
             # Try to get existing record
             record = await self.user_limits.get_by_fields(user_id=user_id)
@@ -823,7 +823,7 @@ class CRUDRateLimit:
                 record.is_limited = True
                 record.reason = reason
                 record.limited_until = limited_until
-                record.updated_at = datetime.utcnow()
+                record.updated_at = datetime.now(timezone.utc)
                 await self.user_limits.update(record)
                 return True
             else:
@@ -854,7 +854,7 @@ class CRUDRateLimit:
                 record.is_limited = False
                 record.reason = None
                 record.limited_until = None
-                record.updated_at = datetime.utcnow()
+                record.updated_at = datetime.now(timezone.utc)
                 await self.user_limits.update(record)
                 return True
 
@@ -874,7 +874,7 @@ class CRUDRateLimit:
 
             if record and record.is_limited:
                 # Check if limitation has expired
-                if record.limited_until and record.limited_until > datetime.utcnow():
+                if record.limited_until and record.limited_until > datetime.now(timezone.utc):
                     return True, record.reason or "Rate limited"
                 else:
                     # Limitation has expired, update the record

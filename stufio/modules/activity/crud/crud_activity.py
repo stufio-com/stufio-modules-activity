@@ -1,4 +1,4 @@
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 import hashlib
 import logging
 from typing import List, Optional, Dict, Any, Tuple
@@ -145,7 +145,7 @@ class CRUDUserActivity:
         for fp in security_profile.known_fingerprints:
             if fp.ip == client_ip and fp.user_agent == user_agent:
                 # Update existing fingerprint
-                fp.last_seen = datetime.utcnow()
+                fp.last_seen = datetime.now(timezone.utc)
                 fp.request_count += 1
                 fingerprint_exists = True
                 break
@@ -200,7 +200,7 @@ class CRUDUserActivity:
                 # have been used recently
                 if not known_fingerprint:
                     # Get recent activities for this user
-                    recent_time = datetime.utcnow() - timedelta(hours=24)
+                    recent_time = datetime.now(timezone.utc) - timedelta(hours=24)
 
                     # Query ClickHouse directly
                     ch_client = await self.activity.client
@@ -224,7 +224,7 @@ class CRUDUserActivity:
                     if len(unique_ips) > settings.activity_SECURITY_MAX_UNIQUE_IPS_PER_DAY:
                         # Update security profile
                         security_profile.suspicious_activity_count += 1
-                        security_profile.last_suspicious_activity = datetime.utcnow()
+                        security_profile.last_suspicious_activity = datetime.now(timezone.utc)
                         await self.security_profiles.update(
                             security_profile,
                             security_profile.model_dump()
@@ -289,7 +289,7 @@ class CRUDUserActivity:
         """Log a suspicious activity event in ClickHouse"""
         try:
             # Create the suspicious activity log entry
-            now = datetime.utcnow()
+            now = datetime.now(timezone.utc)
             date = now.replace(hour=0, minute=0, second=0, microsecond=0)
 
             if not user_id:
@@ -447,8 +447,8 @@ class CRUDUserActivity:
         new_fingerprint = ClientFingerprint(
             ip=device.ip,
             user_agent=device.user_agent,
-            first_seen=datetime.utcnow(),
-            last_seen=datetime.utcnow(),
+            first_seen=datetime.now(timezone.utc),
+            last_seen=datetime.now(timezone.utc),
             request_count=1
         )
 
@@ -591,7 +591,7 @@ class CRUDUserActivity:
     ) -> Dict[str, Any]:
         """Record a suspicious activity and update user's security profile"""
         # Create suspicious activity record
-        now = datetime.utcnow()
+        now = datetime.now(timezone.utc)
         activity = SuspiciousActivity(
             user_id=user_id,
             timestamp=now,
@@ -630,7 +630,7 @@ class CRUDUserActivity:
         ip_block = IPBlacklist(
             ip=ip_address,
             reason=reason,
-            created_at=datetime.utcnow(),
+            created_at=datetime.now(timezone.utc),
             created_by=created_by,
             expires_at=expires_at
         )

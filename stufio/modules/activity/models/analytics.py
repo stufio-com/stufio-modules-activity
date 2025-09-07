@@ -1,5 +1,4 @@
 from datetime import datetime, date
-from pydantic import ConfigDict
 from stufio.db.clickhouse_base import ClickhouseBase
 
 
@@ -11,7 +10,7 @@ class UserActivitySummary(ClickhouseBase):
     unique_endpoints: int
     error_count: int
 
-    model_config = ConfigDict(table_name="user_activity_summary")
+    model_config = {"table_name": "user_activity_summary"}
 
 
 class UserActivityPathStatistics(ClickhouseBase):
@@ -24,7 +23,7 @@ class UserActivityPathStatistics(ClickhouseBase):
     error_rate: float
     unique_users: int
 
-    model_config = ConfigDict(table_name="user_activity_path_stat")
+    model_config = {"table_name": "user_activity_path_stat"}
 
 
 class UserActivityErrorStatistics(ClickhouseBase):
@@ -35,4 +34,4 @@ class UserActivityErrorStatistics(ClickhouseBase):
     error_count: int
     latest_occurrence: datetime
 
-    model_config = ConfigDict(table_name="user_activity_error_stat")
+    model_config = {"table_name": "user_activity_error_stat"}

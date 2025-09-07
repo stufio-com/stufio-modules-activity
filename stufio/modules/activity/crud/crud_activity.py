@@ -46,6 +46,7 @@ class CRUDUserActivity:
 
             # Generate a unique ID for this activity
             event_id = str(uuid.uuid4())
+            # Use timezone-aware UTC datetime
             current_time = datetime_now_sec()
 
             # Create the activity record with explicit timestamp and ID
@@ -65,6 +66,12 @@ class CRUDUserActivity:
 
             # Use the dict_for_insert method to ensure proper data formatting
             insert_data = api_request.dict_for_insert()
+
+            # Ensure all datetime fields are timezone-naive for ClickHouse
+            for key, value in insert_data.items():
+                if isinstance(value, datetime) and value.tzinfo is not None:
+                    # Convert to UTC and remove timezone info
+                    insert_data[key] = value.astimezone(timezone.utc).replace(tzinfo=None)
 
             # Get the ClickHouse client directly for more control
             client = await self.activity.client
@@ -91,26 +98,28 @@ class CRUDUserActivity:
             # Add diagnostics to help debug the issue
             try:
                 if 'insert_data' in locals():
+                    # Log the insert data
                     logger.debug(f"Insert data: {insert_data}")
 
-                # Get actual table structure
-                schema_result = await client.query(f"DESCRIBE TABLE {UserActivity.get_table_name()}")
-                schema_columns = [row[0] for row in schema_result.result_rows]
-                logger.debug(f"ClickHouse table columns: {schema_columns}")
+                if 'client' in locals():
+                    # Get actual table structure
+                    schema_result = await client.query(f"DESCRIBE TABLE {UserActivity.get_table_name()}")
+                    schema_columns = [row[0] for row in schema_result.result_rows]
+                    logger.debug(f"ClickHouse table columns: {schema_columns}")
 
-                if 'insert_data' in locals():
-                    logger.debug(f"Data columns: {list(insert_data.keys())}")
+                    if 'insert_data' in locals():
+                        logger.debug(f"Data columns: {list(insert_data.keys())}")
 
-                    # Show differences
-                    table_set = set(schema_columns)
-                    data_set = set(insert_data.keys())
-                    missing_in_data = table_set - data_set
-                    extra_in_data = data_set - table_set
+                        # Show differences
+                        table_set = set(schema_columns)
+                        data_set = set(insert_data.keys())
+                        missing_in_data = table_set - data_set
+                        extra_in_data = data_set - table_set
 
-                    if missing_in_data:
-                        logger.error(f"Columns in table but missing in data: {missing_in_data}")
-                    if extra_in_data:
-                        logger.error(f"Columns in data but missing in table: {extra_in_data}")
+                        if missing_in_data:
+                            logger.error(f"Columns in table but missing in data: {missing_in_data}")
+                        if extra_in_data:
+                            logger.error(f"Columns in data but missing in table: {extra_in_data}")
             except Exception as debug_e:
                 logger.error(f"Error during diagnostics: {debug_e}")
 
@@ -128,7 +137,7 @@ class CRUDUserActivity:
 
         if not security_profile:
             # Create new profile
-            security_profile = UserSecurityProfile(
+            security_profile = UserSecurityProfile(  # type: ignore
                 user_id=user_id,
                 known_fingerprints=[
                     ClientFingerprint(
@@ -289,7 +298,7 @@ class CRUDUserActivity:
         """Log a suspicious activity event in ClickHouse"""
         try:
             # Create the suspicious activity log entry
-            now = datetime.now(timezone.utc)
+            now = datetime_now_sec()
             date = now.replace(hour=0, minute=0, second=0, microsecond=0)
 
             if not user_id:
@@ -307,10 +316,10 @@ class CRUDUserActivity:
             elif any(keyword in reason.lower() for keyword in low_severity_keywords):
                 severity = "low"
 
-            # Create suspicious activity record
+            # Create suspicious activity record with timezone-naive datetimes for ClickHouse
             suspicious = SuspiciousActivity(
-                timestamp=now,
-                date=date,
+                timestamp=now.replace(tzinfo=None),  # Remove timezone for ClickHouse
+                date=date.replace(tzinfo=None),      # Remove timezone for ClickHouse
                 user_id=user_id,
                 client_ip=client_ip,
                 user_agent=user_agent,
@@ -427,7 +436,7 @@ class CRUDUserActivity:
 
         if not profile:
             # Create a new profile
-            profile = UserSecurityProfile(user_id=user_id)
+            profile = UserSecurityProfile(user_id=user_id)  # type: ignore
             return await self.security_profiles.create(profile)
 
         return profile
@@ -587,16 +596,25 @@ class CRUDUserActivity:
         user_agent: str,
         activity_type: str,
         severity: str = "medium",
-        details: Optional[str] = None
+        details: Optional[str] = None,
+        path: str = "/unknown",
+        method: str = "UNKNOWN",
+        status_code: int = 0
     ) -> Dict[str, Any]:
         """Record a suspicious activity and update user's security profile"""
         # Create suspicious activity record
-        now = datetime.now(timezone.utc)
+        now_utc = datetime_now_sec()
+
+        # For ClickHouse, use timezone-naive UTC datetime
         activity = SuspiciousActivity(
             user_id=user_id,
-            timestamp=now,
+            timestamp=now_utc.replace(tzinfo=None),  # Remove timezone for ClickHouse
+            date=now_utc.replace(hour=0, minute=0, second=0, microsecond=0, tzinfo=None),
             client_ip=client_ip,
             user_agent=user_agent,
+            path=path,
+            method=method,
+            status_code=status_code,
             activity_type=activity_type,
             severity=severity,
             details=details
@@ -607,12 +625,13 @@ class CRUDUserActivity:
         activity_dict = activity.model_dump()
 
         # Update user's security profile using self.security_profiles
+        # For MongoDB, use timezone-aware UTC datetime
         collection = await self.security_profiles.engine.get_collection(UserSecurityProfile.get_collection_name())
         await collection.update_one(
             {"user_id": user_id},
             {
                 "$inc": {"suspicious_activity_count": 1},
-                "$set": {"last_suspicious_activity": now}
+                "$set": {"last_suspicious_activity": now_utc}  # Keep timezone-aware for MongoDB
             },
             upsert=True
         )
@@ -627,7 +646,7 @@ class CRUDUserActivity:
         expires_at: Optional[datetime] = None
     ) -> Dict[str, Any]:
         """Add an IP to the blacklist"""
-        ip_block = IPBlacklist(
+        ip_block = IPBlacklist(  # type: ignore
             ip=ip_address,
             reason=reason,
             created_at=datetime.now(timezone.utc),
@@ -694,7 +713,10 @@ class CRUDUserActivity:
             user_agent="system",
             activity_type="account_restricted",
             severity="high",
-            details=reason
+            details=reason,
+            path="/system/restrict",
+            method="SYSTEM",
+            status_code=200
         )
 
         return True
